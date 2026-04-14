@@ -60,12 +60,23 @@ boot.bin: boot.s
 #	Build the kernel binary image (8 pages, 128 KB)
 #
 image: boot.bin
-	# Concatenate kernel banks into a single image
-	cat ../../common.bin > fuzix.sprinter
-	dd if=../../bank1.bin bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
+	# Assemble 8 hardware pages (128 KB) in order 0-7.
+	# common.bin / bankN.bin are flat 64-KB address-space images:
+	#   common.bin  0x0000-0x3FFF = page 0 (CODE/WIN0)
+	#               0xC000-0xFFFF = page 3 (COMMONMEM/WIN3)
+	#   bank1.bin   0x4000-0x7FFF = page 1, 0x8000-0xBFFF = page 2 (CODE1)
+	#   bank2.bin   0x4000-0x7FFF = page 4 (CODE2; page 5 is empty)
+	#   bank3.bin   0x4000-0x7FFF = page 6 (CODE3; page 7 is empty)
+	# Pages 5 and 7 must be present as zero-filled pages to keep hardware
+	# page numbers aligned with disk sector offsets (boot.s maps sector N
+	# directly to hardware page N).
+	dd if=../../common.bin bs=16384 count=1 conv=sync > fuzix.sprinter
+	dd if=../../bank1.bin  bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
 	dd if=../../common.bin bs=16384 skip=3 count=1 conv=sync >> fuzix.sprinter
-	dd if=../../bank2.bin bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
-	dd if=../../bank3.bin bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
+	dd if=../../bank2.bin  bs=16384 skip=1 count=1 conv=sync >> fuzix.sprinter
+	dd if=/dev/zero        bs=16384        count=1            >> fuzix.sprinter
+	dd if=../../bank3.bin  bs=16384 skip=1 count=1 conv=sync >> fuzix.sprinter
+	dd if=/dev/zero        bs=16384        count=1            >> fuzix.sprinter
 
 diskimage: image
 	mkdir -p $(IMAGES)

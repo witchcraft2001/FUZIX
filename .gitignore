@@ -72,3 +72,4 @@ Applications/games/2048/2048
 # Local agent guides (generated per contributor instructions)
 AGENTS.md
 CLAUDE.md
+Kernel/platform/platform-sprinter/fuzix.sprinter
