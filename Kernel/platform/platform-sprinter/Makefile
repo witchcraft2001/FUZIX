@@ -44,9 +44,22 @@ clean:
 IMAGES = $(FUZIX_ROOT)/Images/$(TARGET)
 
 #
-#	Build the kernel binary image
+#	Build the 512-byte boot sector binary
 #
-image:
+#	Layout (raw sectors):
+#	  Sector 0:        boot.bin     (512 bytes, ORG 0x8000)
+#	  Sectors 1-256:   fuzix.sprinter (8 pages x 16KB = 128KB)
+#	  Sectors 257+:    FUZIX filesystem
+#
+boot.bin: boot.s
+	sdasz80 -o boot.s
+	sdldz80 -i boot.rel
+	makebin -s 0x8200 -o 0x8000 boot.ihx > boot.bin
+
+#
+#	Build the kernel binary image (8 pages, 128 KB)
+#
+image: boot.bin
 	# Concatenate kernel banks into a single image
 	cat ../../common.bin > fuzix.sprinter
 	dd if=../../bank1.bin bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
@@ -57,6 +70,13 @@ image:
 diskimage: image
 	mkdir -p $(IMAGES)
 	cp fuzix.sprinter $(IMAGES)/
+	cp boot.bin $(IMAGES)/
+	# Create a 2 MB raw disk image
+	dd if=/dev/zero of=$(IMAGES)/fuzix.img bs=512 count=4096
+	# Sector 0: boot sector
+	dd if=boot.bin of=$(IMAGES)/fuzix.img bs=512 count=1 conv=notrunc
+	# Sectors 1-256: kernel (128 KB = 256 sectors)
+	dd if=fuzix.sprinter of=$(IMAGES)/fuzix.img bs=512 seek=1 conv=notrunc
 
 ## Dependencies
 commonmem.s: ../../cpu-z80/std-commonmem.s

@@ -1,4 +1,5 @@
 # SDCC stuff
+*.ihx
 *.lnk
 *.lst
 *.map
