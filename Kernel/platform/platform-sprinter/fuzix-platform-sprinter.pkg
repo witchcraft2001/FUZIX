@@ -1,0 +1,8 @@
+package platform-sprinter
+
+# Self-disabled: only activated via -p platform-sprinter when building
+# the disk image for the Sprinter target.
+disable-pkg platform-sprinter
+
+# No platform-specific overrides needed for now.
+# The Sprinter has 4MB RAM and runs standard Z80 binaries.

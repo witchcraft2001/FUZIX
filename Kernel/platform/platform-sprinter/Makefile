@@ -82,12 +82,14 @@ diskimage: image
 	mkdir -p $(IMAGES)
 	cp fuzix.sprinter $(IMAGES)/
 	cp boot.bin $(IMAGES)/
-	# Create a 2 MB raw disk image
-	dd if=/dev/zero of=$(IMAGES)/fuzix.img bs=512 count=4096
-	# Sector 0: boot sector
+	# Create a 32 MB raw disk image (65792 sectors = 257 kernel + 65535 filesystem)
+	dd if=/dev/zero of=$(IMAGES)/fuzix.img bs=512 count=65792
+	# Sector 0: boot sector (also contains the MBR partition table at byte 446)
 	dd if=boot.bin of=$(IMAGES)/fuzix.img bs=512 count=1 conv=notrunc
 	# Sectors 1-256: kernel (128 KB = 256 sectors)
 	dd if=fuzix.sprinter of=$(IMAGES)/fuzix.img bs=512 seek=1 conv=notrunc
+	# Sectors 257+: FUZIX filesystem (partition 1 per MBR in boot sector)
+	dd if=$(IMAGES)/filesys.img of=$(IMAGES)/fuzix.img bs=512 seek=257 conv=notrunc
 
 ## Dependencies
 commonmem.s: ../../cpu-z80/std-commonmem.s

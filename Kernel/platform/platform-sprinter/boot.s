@@ -146,6 +146,37 @@ cur_lba:
 	.dw	KERN_LBA_START		; current disk LBA (low 16 bits)
 
 ; =============================================================================
+; MBR partition table at bytes 446-509 (standard PC MBR layout).
+;
+; tinydisk_setup() reads sector 0, checks 0x55AA signature, then parses
+; the four 16-byte partition entries here.  We declare one FUZIX filesystem
+; partition (type 0x7E) at LBA 257 (right after boot sector + kernel).
+;
+; Entry format (16 bytes):
+;   offset 0:     status (0x80 = bootable)
+;   offset 1-3:   CHS start (ignored for LBA, set 0)
+;   offset 4:     partition type
+;   offset 5-7:   CHS end   (ignored for LBA, set 0)
+;   offset 8-11:  LBA first (little-endian uint32)
+;   offset 12-15: LBA count (little-endian uint32)
+; =============================================================================
+	.org	0x81BE			; byte 446 of the boot sector
+	; Partition 1: FUZIX FS, LBA first=257, count=65535
+	.db	0x80			; status: bootable
+	.db	0x00, 0x00, 0x00	; CHS first (ignored)
+	.db	0x7E			; type: FUZIX filesystem
+	.db	0x00, 0x00, 0x00	; CHS last  (ignored)
+	.db	0x01, 0x01, 0x00, 0x00	; LBA first = 257 (little-endian)
+	.db	0xFF, 0xFF, 0x00, 0x00	; LBA count = 65535 (little-endian)
+	; Partitions 2-4: empty (16 zero bytes each)
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+; =============================================================================
 ; PC-compatible boot signature at bytes 510-511
 ; =============================================================================
 	.org	0x81FE

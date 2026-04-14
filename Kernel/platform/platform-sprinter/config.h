@@ -93,4 +93,11 @@ extern uint16_t swap_dev;
 
 #define TTYDEV   BOOT_TTY /* Device used by kernel for messages, panics */
 
+/*
+ * Root device: hda1 = IDE 0 master, partition 1 (LBA 257..65791)
+ * The partition entry is embedded in the boot sector at byte 446.
+ */
+#define BOOTDEVICE	0x0001		/* major 0 (hd), minor 1 (hda1) */
+#define BOOTDEVICENAMES	"hd#"
+
 #define plt_copyright()		/* for now */
