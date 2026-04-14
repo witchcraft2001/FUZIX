@@ -1,0 +1,91 @@
+; FUZIX mnemonics for Sprinter (Peters MC 2008) platform
+
+U_DATA__TOTALSIZE	.equ	0x200	; 256+256 bytes
+Z80_TYPE		.equ	0	; Standard Z80 (Z84C15)
+USE_FANCY_MONITOR	.equ	0	; No fancy monitor
+
+Z80_MMU_HOOKS		.equ	0
+
+CONFIG_SWAP		.equ	1
+
+PROGBASE		.equ	0x0000
+PROGLOAD		.equ	0x0100
+
+TICKSPERSEC		.equ	50
+
+; Sprinter memory paging ports (R/W)
+MPGSEL_0	.equ	0x82	; Window 0 page select (0x0000-0x3FFF)
+MPGSEL_1	.equ	0xA2	; Window 1 page select (0x4000-0x7FFF)
+MPGSEL_2	.equ	0xC2	; Window 2 page select (0x8000-0xBFFF)
+MPGSEL_3	.equ	0xE2	; Window 3 page select (0xC000-0xFFFF)
+
+; Sprinter system control ports
+SYS_PORT_ON	.equ	0x7C	; Enter native Sprinter mode
+SYS_PORT_OFF	.equ	0x3C	; Enter ZX Spectrum mode
+
+; Z84C15 CTC ports
+CTC_CH0		.equ	0x10	; CTC channel 0
+CTC_CH1		.equ	0x11	; CTC channel 1
+CTC_CH2		.equ	0x12	; CTC channel 2
+CTC_CH3		.equ	0x13	; CTC channel 3
+
+; Z84C15 SIO ports (PS/2 keyboard)
+SIO_DATA_A	.equ	0x18	; SIO Channel A data (keyboard)
+SIO_CTRL_A	.equ	0x19	; SIO Channel A control
+
+; Video control ports
+VID_MODE	.equ	0xC3	; Graphics mode select
+VID_CTRL	.equ	0xC9	; Video control (double buffer, on/off)
+VID_PAGE	.equ	0x89	; Video page / palette index
+VID_BORDER	.equ	0xCA	; Border color
+
+; IDE ports (16-bit port addressing via BC register)
+; Write ports
+IDE_W_DATA	.equ	0x50	; Data port (low byte, B=0x01 for write)
+IDE_W_ERR	.equ	0x51	; Error/Features
+IDE_W_CNT	.equ	0x52	; Sector count
+IDE_W_SEC	.equ	0x53	; Sector number / LBA 0-7
+IDE_W_CYL_L	.equ	0x54	; Cylinder low / LBA 8-15
+IDE_W_CYL_H	.equ	0x55	; Cylinder high / LBA 16-23
+IDE_W_DRV	.equ	0x52	; Drive/Head (B=0x41 for write)
+IDE_W_CMD	.equ	0x53	; Command (B=0x41 for write)
+
+; Read ports
+IDE_R_DATA	.equ	0x50	; Data port (low byte, B=0x00 for read)
+IDE_R_ERR	.equ	0x51	; Error
+IDE_R_CNT	.equ	0x52	; Sector count
+IDE_R_SEC	.equ	0x53	; Sector number
+IDE_R_CYL_L	.equ	0x54	; Cylinder low
+IDE_R_CYL_H	.equ	0x55	; Cylinder high
+IDE_R_DRV	.equ	0x52	; Drive/Head (B=0x40 for read)
+IDE_R_STATUS	.equ	0x53	; Status (B=0x40 for read)
+
+; IDE status bits
+IDE_BSY		.equ	7	; Busy
+IDE_RDY		.equ	6	; Ready
+IDE_DRQ		.equ	3	; Data request
+IDE_ERR		.equ	0	; Error
+
+; CMOS/RTC ports (via MAX7000 DCP)
+CMOS_ADR	.equ	0x1D	; CMOS register address write
+CMOS_DAT_W	.equ	0x1E	; CMOS data write
+CMOS_DAT_R	.equ	0x1C	; CMOS data read
+
+; FDD ports (WD1793 via MAX7000)
+FDD_CMD		.equ	0x1F	; WD1793 command/status (also 0x0F for read)
+FDD_STAT	.equ	0x0F	; WD1793 status (read)
+FDD_TRK		.equ	0x3F	; WD1793 track register
+FDD_SEC		.equ	0x5F	; WD1793 sector register
+FDD_DAT		.equ	0x7F	; WD1793 data register
+FDD_CTL		.equ	0xFF	; Drive control
+
+; AY-3-8910 (FPGA emulated)
+AY_REG		.equ	0x8D	; AY register select
+AY_DAT_W	.equ	0x8E	; AY data write
+AY_DAT_R	.equ	0x8C	; AY data read
+
+; Screen VRAM page for ZX mode
+VRAM_PAGE_SCR	.equ	0x55	; VRAM page for ZX screen (page 5)
+
+; Buffer count
+NBUFS		.equ	5
