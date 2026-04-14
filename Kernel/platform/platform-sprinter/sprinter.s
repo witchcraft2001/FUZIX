@@ -69,7 +69,7 @@ init_hardware:
 	;
 	; We select text mode explicitly in case BIOS left us
 	; in a different mode:
-	ld a, #0x02		; 640x256 / text mode via port #C3
+	ld a, #0x03		; text 80x32 mode via port #C3
 	out (VID_MODE), a
 
 	; Set up CTC for 50Hz timer interrupt

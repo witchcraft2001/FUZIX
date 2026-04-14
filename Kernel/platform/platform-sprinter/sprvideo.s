@@ -1,15 +1,20 @@
 ;
 ;	Sprinter native 80x32 text mode video driver
 ;
-;	Hardware text mode: 2 bytes per cell (char code + color attribute).
-;	Font (знакогенератор) loaded by BIOS into VRAM at power-on.
+;	Hardware text mode (ALL_MODE port #C3, value #03):
+;	  2 bytes per cell: char code + colour attribute.
+;	  Font loaded by BIOS into VRAM at power-on.
 ;
-;	VRAM addressing (VIDEO2.TDF, VCM=3, CT5=0 for char data):
-;	  VRAM page  = #50 + (col >> 3)
-;	  offset     = ((col & 7) << 11) | 0x0300 | (row << 2)
-;	  Char code at offset+0, attribute at offset+1
+;	VRAM access per cell (col 0..79, row 0..31):
+;	  1. Map VRAM page #50 into WIN2 (0x8000-0xBFFF) via port MPGSEL_2
+;	  2. Set RGADR (VID_PAGE, port #89) = col + 1
+;	  3. char byte at 0x8300 + row*4
+;	  4. attr byte at 0x8301 + row*4
 ;
-;	We map the needed VRAM page into WIN2 (0x8000-0xBFFF) temporarily.
+;	SDCC Z80 calling convention (old style, sdcccall(0)):
+;	  Two int8_t args packed into one 16-bit word: first arg in E, second in D.
+;	  Additional args pushed separately (low-byte in C).
+;	  Return address popped into HL at function entry.
 ;
 
         .module sprvideo
@@ -23,329 +28,336 @@
         .globl _clear_lines
         .globl _clear_across
         .globl _do_beep
-	.globl _vtattr_notify
-	.globl _vtattr_cap
+        .globl _vtattr_notify
+        .globl _vtattr_cap
 
         .include "kernel.def"
 
-        .area _VIDEO
+        .area _CODE
 
 _vtattr_cap:
-	.db 0
+        .db 0
 
 ;----------------------------------------------------------------------
 ; Default text attribute: white ink (0xF) on black paper (0x0)
 ;----------------------------------------------------------------------
-DATTR	.equ	0x0F
+DATTR		.equ	0x0F
 
 ;----------------------------------------------------------------------
-; videopos: compute VRAM page + address for cell (D=col, E=row)
-;
-; Returns: C = VRAM page number
-;          HL = address within WIN2 (0x8000 + offset)
+; VRAM page for text mode
+;----------------------------------------------------------------------
+VRAM_TEXT	.equ	0x50
+
+;----------------------------------------------------------------------
+; map_vr: save current WIN2 page, map VRAM page #50 into WIN2
 ; Destroys: A
 ;----------------------------------------------------------------------
-videopos:
-	; page = #50 + (col >> 3)
-	ld a, d
-	srl a
-	srl a
-	srl a
-	add a, #0x50		; VRAM_PAGE_SCR base
-	ld c, a
-
-	; offset high byte: ((col & 7) << 3) | 0x03
-	ld a, d
-	and #0x07
-	rlca
-	rlca
-	rlca			; (col&7) << 3  — becomes bits 13:11
-	or #0x03		; set bits 9:8 = constant 11
-	add a, #0x80		; add WIN2 base 0x8000
-	ld h, a
-
-	; offset low byte: (row << 2)
-	ld a, e
-	rlca
-	rlca
-	and #0xFC
-	ld l, a
-	ret
-
-;----------------------------------------------------------------------
-; Helpers: map / unmap VRAM page in WIN2
-; map_vr: maps page C into WIN2, pushes old page
-; unmap_vr: pops and restores old WIN2 page
-;----------------------------------------------------------------------
 map_vr:
-	in a, (MPGSEL_2)
-	push af			; save current WIN2 page
-	ld a, c
-	out (MPGSEL_2), a
-	ret
-
-unmap_vr:
-	pop af			; saved page from map_vr
-	out (MPGSEL_2), a
-	ret
+        in a, (MPGSEL_2)
+        push af
+        ld a, #VRAM_TEXT
+        out (MPGSEL_2), a
+        ret
 
 ;----------------------------------------------------------------------
-; _plot_char(uint8_t y, uint8_t x, uint16_t c)
+; unmap_vr: restore WIN2 page saved by map_vr
+; Destroys: A (flags)
+;----------------------------------------------------------------------
+unmap_vr:
+        pop af
+        out (MPGSEL_2), a
+        ret
+
+;----------------------------------------------------------------------
+; cell_hl: set RGADR and compute char address for cell (D=col, E=row)
+; On entry:  D = col (0..79), E = row (0..31)
+; On exit:   HL = 0x8300 + row*4  (char byte address in WIN2)
+;            RGADR (VID_PAGE) set to col+1
+; Destroys:  A
+; WIN2 must already be mapped to VRAM page #50 (via map_vr)
+;----------------------------------------------------------------------
+cell_hl:
+        ld a, d
+        inc a
+        out (VID_PAGE), a	; RGADR = col + 1
+        ld a, e
+        rlca
+        rlca			; A = row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + row*4
+        ret
+
+;----------------------------------------------------------------------
+; _plot_char(int8_t y, int8_t x, uint16_t c)
 ;----------------------------------------------------------------------
 _plot_char:
-	pop iy
         pop hl
-        pop de              ; D = x (col), E = y (row)
-        pop bc              ; C = character code
+        pop de			; D = x (col), E = y (row)
+        pop bc			; C = character code
         push bc
         push de
         push hl
-	push iy
 
-	call videopos		; C=page, HL=addr
-	call map_vr
-
-        ld (hl), c          ; character
-	inc hl
-	ld (hl), #DATTR     ; attribute
-
-	jp unmap_vr		; restore and return
-
+        call map_vr
+        call cell_hl
+        ld (hl), c		; write character
+        inc hl
+        ld (hl), #DATTR		; write attribute
+        jp unmap_vr
 
 ;----------------------------------------------------------------------
-; _clear_lines(uint8_t row, uint8_t count)
-;----------------------------------------------------------------------
-_clear_lines:
-	pop bc
-        pop hl
-        pop de              ; E = start row, D = count
-        push de
-        push hl
-	push bc
-
-cl_next:
-	push de
-	ld d, #0
-	ld b, d
-	ld c, #80
-	push bc
-	push de
-	push af
-	call _clear_across
-	pop af
-	pop hl
-	pop hl
-	pop de
-	inc e
-	dec d
-	jr nz, cl_next
-	ret
-
-
-;----------------------------------------------------------------------
-; _clear_across(uint8_t y, uint8_t x, uint16_t count)
+; _clear_across(int8_t y, int8_t x, int16_t count)
 ;
-; Clear 'count' cells starting at (x, y)
+; Clears 'count' cells starting at (x, y) with space + DATTR.
+; count is expected to fit in C (max 80).
 ;----------------------------------------------------------------------
 _clear_across:
-	pop iy
         pop hl
-        pop de              ; D = x (col), E = y (row)
-        pop bc              ; C = count
+        pop de			; D = x (col), E = y (row)
+        pop bc			; C = count
         push bc
         push de
         push hl
-	push iy
 
-	; We process one character at a time because cells
-	; span across different VRAM pages (8 cols per page).
-	; For a fast path, we could batch within a page,
-	; but simplicity first.
+        call map_vr
+        ld b, e			; B = row (constant for this call)
 ca_loop:
-	ld a, c
-	or a
-	ret z
-	push bc
-	push de
-	call videopos		; C=page, HL=addr
-	call map_vr
-	ld (hl), #0x20		; space
-	inc hl
-	ld (hl), #DATTR
-	call unmap_vr
-	pop de
-	pop bc
-	inc d			; next column
-	dec c
-	jr ca_loop
-
-
-;----------------------------------------------------------------------
-; _scroll_up: scroll entire screen up by one line
-;----------------------------------------------------------------------
-_scroll_up:
-	; Copy rows 1..31 to 0..30, then clear row 31
-	ld b, #31		; 31 rows to copy
-
-	ld e, #0		; dest row
-su_row:
-	push bc
-	push de
-	ld d, #0		; start col
-	ld b, #80
-su_col:
-	push bc
-	push de
-	; Read (col=D, row=E+1)
-	inc e
-	call videopos
-	call map_vr
-	ld a, (hl)		; char
-	inc hl
-	ld c, (hl)		; attr in C
-	call unmap_vr
-	; A=char, C=attr
-	pop de
-	push de
-	; Write (col=D, row=E)
-	push af
-	push bc			; save attr
-	call videopos
-	call map_vr
-	pop bc			; C=attr
-	pop af			; A=char
-	ld (hl), a
-	inc hl
-	ld (hl), c
-	call unmap_vr
-	pop de
-	pop bc
-	inc d
-	djnz su_col
-
-	pop de
-	pop bc
-	inc e
-	djnz su_row
-
-	; Clear bottom line
-	ld d, #0
-	ld e, #31
-	ld b, #0
-	ld c, #80
-	push bc
-	push de
-	ld hl, #0
-	push hl
-	push iy
-	call _clear_across
-	pop iy
-	pop hl
-	pop hl
-	pop hl
-	ret
-
+        ld a, c
+        or a
+        jr z, ca_done
+        ld a, d
+        inc a
+        out (VID_PAGE), a	; RGADR = col + 1
+        ld a, b			; row
+        rlca
+        rlca			; A = row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + row*4
+        ld (hl), #0x20		; space
+        inc hl
+        ld (hl), #DATTR		; attribute
+        inc d			; next col
+        dec c
+        jr ca_loop
+ca_done:
+        jp unmap_vr
 
 ;----------------------------------------------------------------------
-; _scroll_down: scroll entire screen down by one line
+; _clear_lines(int8_t y, int8_t count)
+;
+; Clears 'count' full rows starting at row y.
 ;----------------------------------------------------------------------
-_scroll_down:
-	ld b, #31
-	ld e, #31		; dest row
-sd_row:
-	push bc
-	push de
-	ld d, #0
-	ld b, #80
-sd_col:
-	push bc
-	push de
-	; Read (col=D, row=E-1)
-	dec e
-	call videopos
-	call map_vr
-	ld a, (hl)
-	inc hl
-	ld c, (hl)
-	call unmap_vr
-	pop de
-	push de
-	; Write (col=D, row=E)
-	push af
-	push bc
-	call videopos
-	call map_vr
-	pop bc
-	pop af
-	ld (hl), a
-	inc hl
-	ld (hl), c
-	call unmap_vr
-	pop de
-	pop bc
-	inc d
-	djnz sd_col
-
-	pop de
-	pop bc
-	dec e
-	djnz sd_row
-
-	; Clear top line
-	ld d, #0
-	ld e, #0
-	ld b, #0
-	ld c, #80
-	push bc
-	push de
-	ld hl, #0
-	push hl
-	push iy
-	call _clear_across
-	pop iy
-	pop hl
-	pop hl
-	pop hl
-	ret
-
-
-;----------------------------------------------------------------------
-; _cursor_on(uint8_t y, uint8_t x)
-;----------------------------------------------------------------------
-_cursor_on:
-	pop bc
+_clear_lines:
         pop hl
-        pop de
+        pop de			; D = count, E = start row
         push de
         push hl
-	push bc
-        ld (cursorpos), de
 
-	call videopos
-	call map_vr
-	inc hl			; point to attribute
-	ld a, (hl)
-	xor #0xFF		; invert
-	ld (hl), a
-	jp unmap_vr
+cl_loop:
+        ld a, d
+        or a
+        ret z
+        push de			; save (D=remaining count, E=current row)
+        ld d, #0		; x = 0
+        ld bc, #80		; count = 80
+        push bc			; push count
+        push de			; push (D=0=x, E=row=y)
+        call _clear_across
+        pop bc			; cleanup
+        pop de			; cleanup
+        pop de			; restore (D=remaining, E=row)
+        inc e			; next row
+        dec d			; decrement count
+        jr cl_loop
+
+;----------------------------------------------------------------------
+; _scroll_up: scroll entire screen up by one row
+;
+; Copies rows 1..31 to rows 0..30, then clears row 31.
+;----------------------------------------------------------------------
+_scroll_up:
+        call map_vr
+
+        ld b, #31		; 31 rows to copy
+        ld e, #0		; dest row = 0
+su_row:
+        push bc
+        push de
+        ld d, #0		; col = 0
+su_col:
+        ; Set RGADR for current col (same for src and dst)
+        ld a, d
+        inc a
+        out (VID_PAGE), a
+
+        ; Read char + attr from src row (e+1)
+        push de			; save (D=col, E=dst_row)
+        inc e			; src_row = dst_row + 1
+        ld a, e
+        rlca
+        rlca			; A = src_row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + src_row*4
+        ld a, (hl)		; char
+        inc hl
+        ld c, (hl)		; attr -> C
+        pop de			; restore (D=col, E=dst_row)
+
+        ; Write char + attr to dst row (e)
+        push bc			; save attr in C
+        push af			; save char in A
+        ld a, e
+        rlca
+        rlca			; A = dst_row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + dst_row*4
+        pop af			; restore char
+        ld (hl), a		; write char
+        inc hl
+        pop bc			; restore attr
+        ld (hl), c		; write attr
+
+        inc d
+        ld a, d
+        cp #80
+        jr nz, su_col
+
+        pop de
+        pop bc
+        inc e			; next dst row
+        djnz su_row
+
+        call unmap_vr
+
+        ; Clear bottom row 31
+        ld e, #31		; y = 31
+        ld d, #0		; x = 0
+        ld bc, #80
+        push bc
+        push de
+        call _clear_across
+        pop bc
+        pop de
+        ret
+
+;----------------------------------------------------------------------
+; _scroll_down: scroll entire screen down by one row
+;
+; Copies rows 30..0 to rows 31..1, then clears row 0.
+;----------------------------------------------------------------------
+_scroll_down:
+        call map_vr
+
+        ld b, #31
+        ld e, #31		; dest row = 31
+sd_row:
+        push bc
+        push de
+        ld d, #0
+sd_col:
+        ; Set RGADR for current col
+        ld a, d
+        inc a
+        out (VID_PAGE), a
+
+        ; Read char + attr from src row (e-1)
+        push de			; save (D=col, E=dst_row)
+        dec e			; src_row = dst_row - 1
+        ld a, e
+        rlca
+        rlca			; A = src_row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + src_row*4
+        ld a, (hl)		; char
+        inc hl
+        ld c, (hl)		; attr -> C
+        pop de			; restore (D=col, E=dst_row)
+
+        ; Write char + attr to dst row (e)
+        push bc
+        push af
+        ld a, e
+        rlca
+        rlca			; A = dst_row * 4
+        ld l, a
+        ld h, #0x83		; HL = 0x8300 + dst_row*4
+        pop af
+        ld (hl), a		; write char
+        inc hl
+        pop bc
+        ld (hl), c		; write attr
+
+        inc d
+        ld a, d
+        cp #80
+        jr nz, sd_col
+
+        pop de
+        pop bc
+        dec e			; next dst row (working upward)
+        djnz sd_row
+
+        call unmap_vr
+
+        ; Clear top row 0
+        ld e, #0		; y = 0
+        ld d, #0		; x = 0
+        ld bc, #80
+        push bc
+        push de
+        call _clear_across
+        pop bc
+        pop de
+        ret
+
+;----------------------------------------------------------------------
+; _cursor_on(int8_t y, int8_t x)
+;
+; Saves cursor position and inverts the attribute at (x, y).
+;----------------------------------------------------------------------
+_cursor_on:
+        pop hl
+        pop de			; D = x (col), E = y (row)
+        push de
+        push hl
+        ; Save cursor position (H=x, L=y -> stored as 16-bit HL)
+        ld h, d
+        ld l, e
+        ld (cursorpos), hl
+
+        call map_vr
+        ; Reload D=x, E=y for cell_hl (HL was overwritten by ld (cursorpos),hl)
+        ld hl, (cursorpos)
+        ld d, h
+        ld e, l
+        call cell_hl
+        inc hl			; point to attribute byte
+        ld a, (hl)
+        xor #0xFF		; invert attribute
+        ld (hl), a
+        jp unmap_vr
 
 ;----------------------------------------------------------------------
 ; _cursor_off / _cursor_disable
+;
+; Restores the default attribute at the saved cursor position.
 ;----------------------------------------------------------------------
 _cursor_disable:
 _cursor_off:
-        ld de, (cursorpos)
-	call videopos
-	call map_vr
-	inc hl
-	ld (hl), #DATTR		; restore default attr
-	jp unmap_vr
+        ld hl, (cursorpos)
+        ld d, h
+        ld e, l
+        call map_vr
+        call cell_hl
+        inc hl
+        ld (hl), #DATTR		; restore default attribute
+        jp unmap_vr
 
 _vtattr_notify:
         ret
 
 ;----------------------------------------------------------------------
-; _do_beep: simple beep via ZX beeper port
+; _do_beep: tone via ZX beeper port (#FE)
 ;----------------------------------------------------------------------
 _do_beep:
         ld e, #0xFF
