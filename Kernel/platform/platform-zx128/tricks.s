@@ -6,7 +6,7 @@
         .module tricks
 
         .globl _ptab_alloc
-        .globl _newproc
+        .globl _makeproc
         .globl _getproc
         .globl _plt_monitor
         .globl _plt_switchout
@@ -25,7 +25,7 @@
         .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
 
         .include "kernel.def"
-        .include "../kernel-z80.def"
+        .include "../../cpu-z80/kernel-z80.def"
 
         .area _COMMONMEM
 
@@ -370,12 +370,15 @@ _dofork:
         pop bc
 
         ; Make a new process table entry, etc.
+	ld hl, #_udata
+	push hl
         ld  hl, (fork_proc_ptr)
         push hl
 	push af
-        call _newproc
+        call _makeproc
 	pop af
-        pop bc 
+        pop bc
+        pop bc
 
         ; runticks = 0;
         ld hl, #0

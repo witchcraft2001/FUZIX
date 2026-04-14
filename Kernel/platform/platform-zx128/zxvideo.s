@@ -10,6 +10,7 @@
         .globl _scroll_up
         .globl _cursor_on
         .globl _cursor_off
+        .globl _cursor_disable
         .globl _clear_lines
         .globl _clear_across
         .globl _do_beep
@@ -252,6 +253,7 @@ _cursor_on:
         ld a, #0xFF
         ld (de), a
         ret
+_cursor_disable:
 _cursor_off:
         ld de, (cursorpos)
         call videopos

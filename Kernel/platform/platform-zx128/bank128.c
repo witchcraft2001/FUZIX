@@ -42,8 +42,19 @@ int pagemap_alloc(ptptr p)
 	return 0;
 }
 
+int pagemap_prepare(struct exec *hdr)
+{
+	if (hdr->a_base == 0)
+		hdr->a_base = PROGLOAD >> 8;
+	if (hdr->a_base != (PROGLOAD >> 8)) {
+		udata.u_error = ENOEXEC;
+		return -1;
+	}
+	return 0;
+}
+
 /* Realloc is trivial - we can't do anything useful */
-int pagemap_realloc(uint16_t size)
+int pagemap_realloc(struct exec *hdr, usize_t size)
 {
 	if (size > MAP_SIZE)
 		return ENOMEM;

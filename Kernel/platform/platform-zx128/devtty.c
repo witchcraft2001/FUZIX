@@ -9,6 +9,11 @@
 
 static char tbuf1[TTYSIZ];
 
+tcflag_t termios_mask[NUM_DEV_TTY + 1] = {
+	0,
+	_CSYS
+};
+
 uint8_t vtattr_cap;
 struct vt_repeat keyrepeat;
 static uint8_t kbd_timer;

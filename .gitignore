@@ -23,3 +23,47 @@ size.report
 *.elf
 bin
 *.debug
+
+# Fuzix Compiler Kit intermediates
+*.#
+*.%
+*.@
+*.^
+
+# macOS debug symbols
+*.dSYM/
+
+# Compiled host tools
+Kernel/tools/cartman
+Kernel/tools/doubleup
+Kernel/tools/flat2z80
+Kernel/tools/makedck
+Kernel/tools/makejv3
+Kernel/tools/maketap
+Kernel/tools/modlib-z80
+Kernel/tools/plus3boot
+Kernel/tools/raw2dsk
+Kernel/tools/raw2dskcpc
+Kernel/tools/raw2mgt
+Kernel/tools/trdify
+Kernel/tools/trslabel
+Kernel/tools/visualize
+Applications/assembler/as
+Applications/assembler/dumprelocs
+Applications/assembler/ld
+Applications/assembler/nm
+Applications/assembler/osize
+Library/tools/syscall_8070
+Library/tools/syscall_z80
+
+# Generated asm from C compilation (fcc intermediates)
+Applications/**/*.s
+Library/libs/*.s
+Library/libs/**/*.s
+Kernel/modlib.s
+
+# Generated Makefiles
+Library/libs/fuzixz80/Makefile
+
+# Compiled games/apps (binaries without extension)
+Applications/games/2048/2048

@@ -39,8 +39,8 @@ static int betadisk_transfer(bool is_read, uint8_t rawflag)
 
 	betadisk_seek_internal(block>>4);
 	block &= 15;
-	betadisk_read_internal(block, udata.u_buf->bf_data);
-	betadisk_read_internal(block+1, udata.u_buf->bf_data+256);
+	betadisk_read_internal(block, udata.u_buf->__bf_data);
+	betadisk_read_internal(block+1, udata.u_buf->__bf_data+256);
 	return 1;
 }
 
