@@ -77,15 +77,13 @@ extern uint16_t swap_dev;
 #define CONFIG_RTC_FULL
 #define CONFIG_RTC_INTERVAL	50
 
-/* Video terminal */
+/* Video terminal - Sprinter native 80x32 text mode */
 #define CONFIG_VT
-/* Font for text console */
-#define CONFIG_FONT8X8
-/* Vt definitions - 32x24 ZX-compatible text */
-#define VT_WIDTH	32
-#define VT_HEIGHT	24
-#define VT_RIGHT	31
-#define VT_BOTTOM	23
+/* Vt definitions - 80x32 native text mode, font in VRAM (loaded by BIOS) */
+#define VT_WIDTH	80
+#define VT_HEIGHT	32
+#define VT_RIGHT	79
+#define VT_BOTTOM	31
 
 #define NUM_DEV_TTY 1
 

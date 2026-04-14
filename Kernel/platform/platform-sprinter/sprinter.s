@@ -60,38 +60,17 @@ init_hardware:
 	; We use pages 0x04-0x4F for user space = 76 pages * 16K = 1216K
         ld hl, #4096
         ld (_ramsize), hl
-        ld hl, #1216		; 76 * 16K user pages
+        ld hl, #1152		; 72 * 16K user pages
         ld (_procmem), hl
 
-	; Set up ZX video mode for console
-	xor a
-	out (VID_MODE), a	; ZX Spectrum mode
-
-	; Clear ZX screen via VRAM page
-	ld a, (mpgsel_cache + 2)
-	push af			; save current WIN2 mapping
-
-	ld a, #VRAM_PAGE_SCR
-	out (MPGSEL_2), a	; map VRAM screen to 0x8000
-
-	; Clear pixel data (0x8000-0x97FF = 6144 bytes)
-	ld hl, #0x8000
-	ld de, #0x8001
-	ld bc, #0x17FF
-	xor a
-	ld (hl), a
-	ldir
-
-	; Set color attributes (0x9800-0x9AFF = 768 bytes)
-	ld hl, #0x9800
-	ld de, #0x9801
-	ld bc, #0x02FF
-	ld a, #7		; black paper, white ink
-	ld (hl), a
-	ldir
-
-	pop af
-	out (MPGSEL_2), a	; restore WIN2
+	; Text mode 80x32 is initialized by BIOS at power-on.
+	; The BIOS loads the font (character generator) into VRAM
+	; and sets up the hardware text mode (VCM=3, port #C3).
+	;
+	; We select text mode explicitly in case BIOS left us
+	; in a different mode:
+	ld a, #0x02		; 640x256 / text mode via port #C3
+	out (VID_MODE), a
 
 	; Set up CTC for 50Hz timer interrupt
 	; CTC channel 2 + 3 chained for timer
