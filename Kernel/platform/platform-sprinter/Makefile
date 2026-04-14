@@ -90,6 +90,17 @@ diskimage: image
 	dd if=fuzix.sprinter of=$(IMAGES)/fuzix.img bs=512 seek=1 conv=notrunc
 	# Sectors 257+: FUZIX filesystem (partition 1 per MBR in boot sector)
 	dd if=$(IMAGES)/filesys.img of=$(IMAGES)/fuzix.img bs=512 seek=257 conv=notrunc
+	# Convert to MAME CHD format if chdman is available
+	-$(if $(shell which chdman 2>/dev/null),chdman createhd \
+	    --input $(IMAGES)/fuzix.img \
+	    --output $(IMAGES)/fuzix.chd \
+	    --compression none --force, \
+	    echo "chdman not found -- skipping CHD conversion (install via: make -C mame TOOLS=1 chdman)")
+
+chd:
+	chdman createhd --input $(IMAGES)/fuzix.img \
+	                --output $(IMAGES)/fuzix.chd \
+	                --compression none --force
 
 ## Dependencies
 commonmem.s: ../../cpu-z80/std-commonmem.s
