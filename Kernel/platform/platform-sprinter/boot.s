@@ -2,8 +2,9 @@
 ;	Sprinter (Peters MC 2008) FUZIX boot sector
 ;
 ;	Loaded by Sprinter BIOS from sector 0 of the boot device.
-;	BIOS loads this 512-byte sector to 0x8000 (WIN2 = RAM page 10)
-;	and jumps to 0x8000 with the boot drive number in register A.
+;	BIOS (DSETUP.ASM OS_LOAD) reads sector to 0x7E00, checks first 12 bytes
+;	for "Starting.",0, then copies 512 bytes to 0x8000 (WIN2 = RAM page 10)
+;	and jumps to 0x800C (offset +12) with the boot drive number in register A.
 ;
 ;	Initial memory windows (after reset, per Sprinter boot sequence docs):
 ;	  WIN0 (0x0000-0x3FFF): ROM page 0 (BIOS) -- RST #08 dispatcher here
@@ -23,14 +24,15 @@
 ;	  6. Jump to 0x0100 (PROGLOAD)
 ;	     crt0.s then sets WIN1=p1, WIN2=p2, WIN3=p3 and calls fuzix_main
 ;
-;	BIOS DRV_READ (#55) call via RST #08:
+;	BIOS DRV_READ (#55) call via RST #18 (boot-sector vector):
 ;	  A  = drive number (#80 = IDE 0 master)
-;	  HL = LBA low word
-;	  DE = LBA high word (0 for disks < 32 MB)
-;	  IX = destination buffer (must lie within one 16 KB window)
+;	  HL = LBA high word (0 for disks < 32 MB)
+;	  IX = LBA low word  (sector number)
+;	  DE = destination buffer address
 ;	  B  = sector count
 ;	  C  = #55 (DRV_READ)
-;	  Returns: CF=0 success, CF=1 error (A = error code)
+;	  Returns: CF=0 success, CF=1 error
+;	  (HDRIVER6.ASM LREADH; same convention as DOSBOOT4.asm RST #18)
 ;
 ;	Disk layout (raw, sector-addressed):
 ;	  Sector 0:       this boot sector (512 bytes)
@@ -58,7 +60,7 @@ DRV_RESET	.equ	0x51	; Reset drive
 DRV_READ	.equ	0x55	; Read sectors from drive
 
 ; ---- Disk / kernel layout ---------------------------------------------------
-KERN_LBA_START	.equ	1	; First kernel sector (0 = boot sector)
+KERN_LBA_START	.equ	2	; First kernel sector (0=MBR, 1=boot sector)
 SECTS_PER_PAGE	.equ	32	; 32 * 512 = 16 384 bytes = one kernel page
 KERN_PAGES	.equ	8	; Kernel pages 0-7
 
@@ -69,20 +71,36 @@ PROGLOAD	.equ	0x0100	; Kernel init entry point (crt0.s: init:)
 IDE0_DRIVE	.equ	0x80	; IDE 0 master
 
 ; =============================================================================
-; Entry point -- BIOS jumps here with drive number in A
+; Sprinter BIOS boot signature (offset 0x00–0x0B, 12 bytes)
+;
+; DSETUP.ASM OS_LOAD compares the first 12 bytes of sector 0 with
+; the string "Starting." followed by a NUL byte (SIDLEN=12).
+; On success it copies the full 512-byte sector to 0x8000 and jumps
+; to 0x800C (offset +12).  Register A = drive number on entry.
+; =============================================================================
+	.ascii	"Starting..."		; 11 bytes: S t a r t i n g . . .
+	.db	0x00			; NUL terminator -- total 12 bytes (0x00-0x0B)
+
+; =============================================================================
+; Entry point at 0x800C -- BIOS jumps here with drive number in A
+;
+; BIOS DRV_READ (#55) call via RST #18 (boot-sector BIOS vector):
+;   A  = drive number
+;   HL = LBA address high 16 bits (0 for disks up to 64K sectors)
+;   IX = LBA address low  16 bits (sector number)
+;   DE = destination buffer address
+;   B  = sector count
+;   C  = #55 (DRV_READ)
+;   Returns: CF=0 success, CF=1 error
+; (Source: HDRIVER6.ASM LREADH/READH; DOSBOOT4.asm uses same convention)
 ; =============================================================================
 boot_start:
 	di
-	ld	(drive_num), a		; save boot drive
+	ld	(drive_num), a		; save boot drive passed by BIOS in A
 
 	; Activate Sprinter native mode so banking ports respond
 	ld	a, #0x1D
 	out	(SYS_PORT_ON), a
-
-	; Reset boot drive (ignore result -- proceed even on soft errors)
-	ld	a, (drive_num)
-	ld	c, #DRV_RESET
-	rst	0x08			; BIOS dispatcher
 
 	; Initialise loop state
 	xor	a
@@ -98,14 +116,14 @@ load_next:
 	ld	a, (page_num)
 	out	(MPGSEL_1), a
 
-	; Set up DRV_READ parameters and call BIOS
-	ld	hl, (cur_lba)		; HL = LBA low word
-	ld	de, #0			; DE = LBA high word (disk < 32 MB)
-	ld	ix, #0x4000		; IX = buffer at WIN1 base
+	; Set up DRV_READ parameters and call BIOS via RST #18
+	ld	hl, #0			; HL = LBA high word (0 for disk < 64K sectors)
+	ld	ix, (cur_lba)		; IX = LBA low word (sector number)
+	ld	de, #0x4000		; DE = buffer at WIN1 base
 	ld	b, #SECTS_PER_PAGE	; B  = 32 sectors (16 KB)
-	ld	c, #DRV_READ		; C  = function code
+	ld	c, #DRV_READ		; C  = #55
 	ld	a, (drive_num)		; A  = drive
-	rst	0x08			; BIOS: read sectors
+	rst	0x18			; BIOS internal call (boot-sector vector)
 	jr	c, boot_error		; CF=1 -> disk read failed
 
 	; Advance LBA for the next page
@@ -144,41 +162,3 @@ page_num:
 	.db	0			; current page index (0..KERN_PAGES-1)
 cur_lba:
 	.dw	KERN_LBA_START		; current disk LBA (low 16 bits)
-
-; =============================================================================
-; MBR partition table at bytes 446-509 (standard PC MBR layout).
-;
-; tinydisk_setup() reads sector 0, checks 0x55AA signature, then parses
-; the four 16-byte partition entries here.  We declare one FUZIX filesystem
-; partition (type 0x7E) at LBA 257 (right after boot sector + kernel).
-;
-; Entry format (16 bytes):
-;   offset 0:     status (0x80 = bootable)
-;   offset 1-3:   CHS start (ignored for LBA, set 0)
-;   offset 4:     partition type
-;   offset 5-7:   CHS end   (ignored for LBA, set 0)
-;   offset 8-11:  LBA first (little-endian uint32)
-;   offset 12-15: LBA count (little-endian uint32)
-; =============================================================================
-	.org	0x81BE			; byte 446 of the boot sector
-	; Partition 1: FUZIX FS, LBA first=257, count=65535
-	.db	0x80			; status: bootable
-	.db	0x00, 0x00, 0x00	; CHS first (ignored)
-	.db	0x7E			; type: FUZIX filesystem
-	.db	0x00, 0x00, 0x00	; CHS last  (ignored)
-	.db	0x01, 0x01, 0x00, 0x00	; LBA first = 257 (little-endian)
-	.db	0xFF, 0xFF, 0x00, 0x00	; LBA count = 65535 (little-endian)
-	; Partitions 2-4: empty (16 zero bytes each)
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	.db	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-
-; =============================================================================
-; PC-compatible boot signature at bytes 510-511
-; =============================================================================
-	.org	0x81FE
-	.db	0x55
-	.db	0xAA

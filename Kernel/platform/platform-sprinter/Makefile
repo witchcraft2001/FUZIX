@@ -39,18 +39,24 @@ $(DISCARD_DOBJS): %.rel: ../../dev/%.c
 	$(CROSS_CC) $(CROSS_CCOPTS) $(CROSS_CC_SEGDISC) -c $<
 
 clean:
-	rm -f $(OBJS) $(JUNK) core *~ fuzix.sprinter
+	rm -f $(OBJS) $(JUNK) core *~ fuzix.sprinter mbr.bin boot.bin
 
 IMAGES = $(FUZIX_ROOT)/Images/$(TARGET)
 
 #
-#	Build the 512-byte boot sector binary
+#	Disk layout (raw sectors):
+#	  Sector 0   (LBA 0):     mbr.bin  (512 B) -- MBR: partition table + 0x55AA
+#	  Sector 1   (LBA 1):     boot.bin (512 B) -- Sprinter boot sector ("Starting...")
+#	  Sectors 2-257 (128 KB): fuzix.sprinter   -- FUZIX kernel (8 pages x 16 KB)
+#	  Sectors 258+:           FUZIX filesystem -- hda1, partition 1 per MBR
 #
-#	Layout (raw sectors):
-#	  Sector 0:        boot.bin     (512 bytes, ORG 0x8000)
-#	  Sectors 1-256:   fuzix.sprinter (8 pages x 16KB = 128KB)
-#	  Sectors 257+:    FUZIX filesystem
+#	The Sprinter BIOS reads LBA 1 to find the OS boot sector.
+#	tinydisk_setup() reads LBA 0 for the MBR partition table.
 #
+
+mbr.bin:
+	python3 -c "import struct,sys;b=bytearray(512);b[446]=0x80;b[450]=0x7E;b[454:458]=struct.pack('<I',258);b[458:462]=struct.pack('<I',65535);b[510]=0x55;b[511]=0xAA;sys.stdout.buffer.write(bytes(b))" > mbr.bin
+
 boot.bin: boot.s
 	sdasz80 -o boot.s
 	sdldz80 -i boot.rel
@@ -59,7 +65,7 @@ boot.bin: boot.s
 #
 #	Build the kernel binary image (8 pages, 128 KB)
 #
-image: boot.bin
+image: mbr.bin boot.bin
 	# Assemble 8 hardware pages (128 KB) in order 0-7.
 	# common.bin / bankN.bin are flat 64-KB address-space images:
 	#   common.bin  0x0000-0x3FFF = page 0 (CODE/WIN0)
@@ -81,15 +87,18 @@ image: boot.bin
 diskimage: image
 	mkdir -p $(IMAGES)
 	cp fuzix.sprinter $(IMAGES)/
+	cp mbr.bin $(IMAGES)/
 	cp boot.bin $(IMAGES)/
-	# Create a 32 MB raw disk image (65792 sectors = 257 kernel + 65535 filesystem)
-	dd if=/dev/zero of=$(IMAGES)/fuzix.img bs=512 count=65792
-	# Sector 0: boot sector (also contains the MBR partition table at byte 446)
-	dd if=boot.bin of=$(IMAGES)/fuzix.img bs=512 count=1 conv=notrunc
-	# Sectors 1-256: kernel (128 KB = 256 sectors)
-	dd if=fuzix.sprinter of=$(IMAGES)/fuzix.img bs=512 seek=1 conv=notrunc
-	# Sectors 257+: FUZIX filesystem (partition 1 per MBR in boot sector)
-	dd if=$(IMAGES)/filesys.img of=$(IMAGES)/fuzix.img bs=512 seek=257 conv=notrunc
+	# Create a 32 MB raw disk image (65793 sectors = 1 MBR + 1 boot + 256 kernel + 65535 fs)
+	dd if=/dev/zero of=$(IMAGES)/fuzix.img bs=512 count=65793
+	# Sector 0 (LBA 0): MBR with partition table
+	dd if=mbr.bin of=$(IMAGES)/fuzix.img bs=512 count=1 conv=notrunc
+	# Sector 1 (LBA 1): Sprinter boot sector
+	dd if=boot.bin of=$(IMAGES)/fuzix.img bs=512 seek=1 conv=notrunc
+	# Sectors 2-257 (LBA 2-257): FUZIX kernel (128 KB = 256 sectors)
+	dd if=fuzix.sprinter of=$(IMAGES)/fuzix.img bs=512 seek=2 conv=notrunc
+	# Sectors 258+ (LBA 258+): FUZIX filesystem (partition 1 per MBR at LBA 0)
+	dd if=$(IMAGES)/filesys.img of=$(IMAGES)/fuzix.img bs=512 seek=258 conv=notrunc
 	# Convert to MAME CHD format if chdman is available
 	-$(if $(shell which chdman 2>/dev/null),chdman createhd \
 	    --input $(IMAGES)/fuzix.img \
