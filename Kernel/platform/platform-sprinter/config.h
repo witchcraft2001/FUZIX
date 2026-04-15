@@ -36,6 +36,8 @@
 /* Banks as reported to user space */
 #define CONFIG_BANKS	4
 
+#define CONFIG_SPRINTER_EARLY_TRACE
+
 #define TICKSPERSEC 50	    /* 50 Hz CTC interrupt */
 #define PROGBASE    0x0000  /* also data base */
 #define PROGLOAD    0x0100  /* also data base */

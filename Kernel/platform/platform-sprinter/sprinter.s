@@ -26,7 +26,11 @@
 	.globl _kernel_pages
 	.globl _plt_reboot
 	.globl _plt_monitor
+	.globl _plt_trace
 	.globl _int_disabled
+	.globl _sprinter_trace_last
+	.globl _sprinter_trace_idx
+	.globl _sprinter_trace_buf
 
         ; imported symbols
         .globl _ramsize
@@ -107,13 +111,12 @@ init_hardware:
 
 _plt_monitor:
 _plt_reboot:
+	ld a, #0xFE
+	call _plt_trace
 	di
-	; Reset to Sprinter BIOS
-	xor a
-	out (MPGSEL_0), a
-	ld a, #0x80		; ROM page 0
-	out (MPGSEL_0), a
-	rst 0
+plt_monitor_hang:
+	halt
+	jr plt_monitor_hang
 
 plt_interrupt_all:
         ret
@@ -327,6 +330,22 @@ outchar:
 	pop bc
         ret
 
+_plt_trace:
+	ld e, a
+	ld a, (_sprinter_trace_idx)
+	and #0x1F
+	ld c, a
+	inc a
+	ld (_sprinter_trace_idx), a
+	ld b, #0
+	ld hl, #_sprinter_trace_buf
+	add hl, bc
+	ld a, e
+	ld (hl), a
+	ld (_sprinter_trace_last), a
+	out (VID_BORDER), a
+	ret
+
 _tmpout:
 	.db 1
 
@@ -501,6 +520,12 @@ stub_call:
 	cp #BANK1
 	jr z, stub_ret_1
 	call callhl
+	ld a, b
+	cp #BANK2
+	jr z, stub_ret_2
+	ld bc, #MAP_BANK3
+	jr stub_ret
+stub_ret_2:
 	ld bc, #MAP_BANK2
 stub_ret:
 	ld (_kernel_pages+1), bc
@@ -536,3 +561,12 @@ map_savearea:
 
 _int_disabled:
 	.db 1
+
+_sprinter_trace_last:
+	.db 0
+
+_sprinter_trace_idx:
+	.db 0
+
+_sprinter_trace_buf:
+	.ds 32

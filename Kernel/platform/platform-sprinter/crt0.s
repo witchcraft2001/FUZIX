@@ -44,6 +44,7 @@
         .globl s__DATA
         .globl l__DATA
         .globl kstack_top
+	.globl mpgsel_cache
 
 	.include "kernel.def"
 	.include "../../cpu-z80/kernel-z80.def"
@@ -69,22 +70,45 @@ init:
 	ld a, #0x4B
         out (MPGSEL_3), a       ; map page 3 at 0xC000 (common)
 
-        ; switch to stack in common memory
-        ld sp, #kstack_top
+	; Initialize paging cache used by map_save_kernel/map_restore.
+	; If left zeroed, first IRQ would restore WIN0..WIN2 to page 0.
+	ld hl, #mpgsel_cache
+	ld (hl), #0x48
+	inc hl
+	ld (hl), #0x49
+	inc hl
+	ld (hl), #0x4A
+	inc hl
+	ld (hl), #0x4B
 
-        ; Zero the data area
-        ld hl, #s__DATA
-        ld de, #s__DATA + 1
-        ld bc, #l__DATA - 1
-        ld (hl), #0
-        ldir
+	; switch to stack in common memory
+	ld sp, #kstack_top
 
-	; Zero buffers area
-	ld hl, #s__BUFFERS
-	ld de, #s__BUFFERS + 1
-	ld bc, #l__BUFFERS - 1
+	; Zero the data area
+	ld bc, #l__DATA
+	ld a, b
+	or c
+	jr z, zero_buffers
+	ld hl, #s__DATA
+	ld de, #s__DATA + 1
+	dec bc
 	ld (hl), #0
 	ldir
+
+	; Zero buffers area
+
+zero_buffers:
+	ld bc, #l__BUFFERS
+	ld a, b
+	or c
+	jr z, zero_done
+	ld hl, #s__BUFFERS
+	ld de, #s__BUFFERS + 1
+	dec bc
+	ld (hl), #0
+	ldir
+
+zero_done:
 
         ; Hardware setup
         call init_hardware

@@ -4,6 +4,13 @@
 #include <printf.h>
 #include <tty.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define EARLY_TRACE(x) plt_trace(x)
+#else
+#define EARLY_TRACE(x) do { } while (0)
+#endif
+
 #define BAD_ROOT_DEV 0xFFFF
 
 static uint8_t ro = 1;
@@ -338,6 +345,7 @@ static inline uint16_t get_root_dev(void)
 void fuzix_main(void)
 {
 	struct mount *m;
+	uint16_t tty_open_rc;
 	/* setup state */
 	udata.u_ininterrupt = 0;
 	udata.u_insys = true;
@@ -346,12 +354,20 @@ void fuzix_main(void)
 	ramtop = (uaddr_t)PROGTOP;
 #endif
 
+	EARLY_TRACE(0x11);
 	tty_init();
+	EARLY_TRACE(0x12);
 
-	if (d_open(TTYDEV, 0) != 0)
+	EARLY_TRACE(0x13);
+	tty_open_rc = d_open(TTYDEV, 0);
+	EARLY_TRACE(0x14);
+	if (tty_open_rc != 0) {
+		EARLY_TRACE(0xE1);
 		panic(PANIC_NOTTY);
+	}
 
 	/* Sign on messages */
+	EARLY_TRACE(0x15);
 	kprintf(
 			"FUZIX version %s\n"
 			"Copyright (c) 1988-2002 by H.F.Bower, D.Braun, S.Nitschke, H.Peraza\n"
@@ -384,9 +400,13 @@ void fuzix_main(void)
 	ptab_end = &ptab[maxproc];
 
 	bufinit();
+	EARLY_TRACE(0x21);
 	fstabinit();
+	EARLY_TRACE(0x22);
 	pagemap_init();
+	EARLY_TRACE(0x23);
 	create_init();
+	EARLY_TRACE(0x24);
 
 	/* Parameters message */
 	kprintf("%dKiB total RAM, %dKiB available to processes (%d processes max)\n", ramsize, procmem, maxproc);
@@ -404,6 +424,7 @@ void fuzix_main(void)
 
 	/* initialise hardware devices */
 	device_init();
+	EARLY_TRACE(0x30);
 
 	do {
             old_progptr = progptr;
@@ -444,4 +465,3 @@ void fuzix_main(void)
 	udata.u_ptab->p_time = ticks.full;
 	exec_or_die();
 }
-
