@@ -337,19 +337,19 @@ _tmpout:
 ; Banking stubs for inter-bank calls
 ;
 ; Kernel code banks:
-;   Bank 1 (CODE1): pages 1,2 in WIN1,WIN2
-;   Bank 2 (CODE2): pages 4,5 in WIN1,WIN2
-;   Bank 3 (CODE3): pages 6,7 in WIN1,WIN2
+;   Bank 1 (CODE1): pages 0x49,0x4A in WIN1,WIN2
+;   Bank 2 (CODE2): pages 0x4C,0x4D in WIN1,WIN2
+;   Bank 3 (CODE3): pages 0x4E,0x4F in WIN1,WIN2
 ;
 ; MAP_BANKn stores as BC: B=page_for_WIN2, C=page_for_WIN1
 ;=========================================================================
 
-MAP_BANK1	.equ	0x0201	; pages 1,2
-BANK1		.equ	0x01
-MAP_BANK2	.equ	0x0504	; pages 4,5
-BANK2		.equ	0x04
-MAP_BANK3	.equ	0x0706	; pages 6,7
-BANK3		.equ	0x06
+MAP_BANK1	.equ	0x4A49	; pages 0x49,0x4A
+BANK1		.equ	0x49
+MAP_BANK2	.equ	0x4D4C	; pages 0x4C,0x4D
+BANK2		.equ	0x4C
+MAP_BANK3	.equ	0x4F4E	; pages 0x4E,0x4F
+BANK3		.equ	0x4E
 
 	.globl __bank_0_1
 	.globl __bank_0_2
@@ -526,10 +526,10 @@ mpgsel_cache:
 	.db 0, 0, 0, 0		; cached page numbers for all 4 windows
 
 top_bank:
-	.db 3			; current top bank (common) page
+	.db 0x4B			; current top bank (common) page
 
 _kernel_pages:
-	.db 0, 1, 2, 3		; kernel page assignments
+	.db 0x48, 0x49, 0x4A, 0x4B	; kernel page assignments
 
 map_savearea:
 	.db 0, 0, 0, 0		; saved mapping

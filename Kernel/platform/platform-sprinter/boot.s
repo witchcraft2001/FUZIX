@@ -16,11 +16,12 @@
 ;	  1. Save drive number from A register (passed by BIOS)
 ;	  2. Enable Sprinter native mode (SYS_PORT_ON)
 ;	  3. Reset boot drive via BIOS DRV_RESET (#51)
-;	  4. Load 8 FUZIX kernel pages (pages 0-7) via WIN1:
-;	       Page N -> disk LBA = 1 + N*32 (32 sectors = 16 KB per page)
-;	       Buffer = 0x4000 (WIN1 base), MPGSEL_1 set to page N each time
-;	       WIN2 remains page 10 throughout -- no aliasing with pages 0-7
-;	  5. Map kernel page 0 to WIN0 (so 0x0100 has FUZIX crt0 init code)
+;	  4. Load 8 FUZIX kernel pages via WIN1 to high RAM pages:
+;	       Image page N -> physical page (KERN_PAGE_BASE + N)
+;	       Page N -> disk LBA = 2 + N*32 (32 sectors = 16 KB per page)
+;	       Buffer = 0x4000 (WIN1 base), MPGSEL_1 set each iteration
+;	       WIN2 remains page 10 throughout -- no aliasing with kernel pages
+;	  5. Map kernel image page 0 (physical KERN_PAGE_BASE) to WIN0
 ;	  6. Jump to 0x0100 (PROGLOAD)
 ;	     crt0.s then sets WIN1=p1, WIN2=p2, WIN3=p3 and calls fuzix_main
 ;
@@ -36,14 +37,14 @@
 ;
 ;	Disk layout (raw, sector-addressed):
 ;	  Sector 0:       this boot sector (512 bytes)
-;	  Sectors 1-32:   kernel page 0 (16 KB, from fuzix.sprinter offset 0)
-;	  Sectors 33-64:  kernel page 1 (16 KB)
-;	  Sectors 65-96:  kernel page 2 (16 KB)
-;	  Sectors 97-128: kernel page 3 (16 KB, common)
-;	  Sectors 129-160: kernel page 4 (16 KB)
-;	  Sectors 161-192: kernel page 5 (16 KB)
-;	  Sectors 193-224: kernel page 6 (16 KB)
-;	  Sectors 225-256: kernel page 7 (16 KB)
+;	  Sectors 2-33:   kernel image page 0 (16 KB, from fuzix.sprinter offset 0)
+;	  Sectors 34-65:  kernel image page 1 (16 KB)
+;	  Sectors 66-97:  kernel image page 2 (16 KB)
+;	  Sectors 98-129: kernel image page 3 (16 KB, common)
+;	  Sectors 130-161: kernel image page 4 (16 KB)
+;	  Sectors 162-193: kernel image page 5 (16 KB)
+;	  Sectors 194-225: kernel image page 6 (16 KB)
+;	  Sectors 226-257: kernel image page 7 (16 KB)
 ;	  Sectors 257+:   FUZIX filesystem (mkfs.fuzix)
 ;
 
@@ -57,13 +58,13 @@ SYS_PORT_ON	.equ	0x7C	; Enable Sprinter native mode
 
 ; ---- BIOS API ---------------------------------------------------------------
 DRV_RESET	.equ	0x51	; Reset drive
-DRV_LREAD	.equ	0x52	; Long read: A=drive, A'=phys page, HL:IX=LBA, DE=buf, B=count
 DRV_READ	.equ	0x55	; Read sectors (uses current WIN3 page)
 
 ; ---- Disk / kernel layout ---------------------------------------------------
 KERN_LBA_START	.equ	2	; First kernel sector (0=MBR, 1=boot sector)
 SECTS_PER_PAGE	.equ	32	; 32 * 512 = 16 384 bytes = one kernel page
-KERN_PAGES	.equ	8	; Kernel pages 0-7
+KERN_PAGES	.equ	8	; Number of kernel image pages
+KERN_PAGE_BASE	.equ	0x48	; Physical RAM page for kernel image page 0
 
 ; ---- FUZIX entry ------------------------------------------------------------
 PROGLOAD	.equ	0x0100	; Kernel init entry point (crt0.s: init:)
@@ -74,7 +75,7 @@ IDE0_DRIVE	.equ	0x80	; IDE 0 master
 ; =============================================================================
 ; Sprinter BIOS boot signature (offset 0x00–0x0B, 12 bytes)
 ;
-; DSETUP.ASM OS_LOAD compares the first 12 bytes of sector 0 with
+; DSETUP.ASM OS_LOAD compares the first 12 bytes of sector 1 (LBA 1) with
 ; the string "Starting." followed by a NUL byte (SIDLEN=12).
 ; On success it copies the full 512-byte sector to 0x8000 and jumps
 ; to 0x800C (offset +12).  Register A = drive number on entry.
@@ -102,17 +103,20 @@ LP_PRINT_SYM	.equ	0x82
 boot_start:
 	di
 	ld	sp, #0xBFF0		; stack in WIN2 (page 10, our boot sector page)
-	; Page 10 is never overwritten by DRV_LREAD (loads pages 0-7 only).
-	; If SP were in WIN3 (page 0) and BIOS remapped WIN3 during LREAD,
-	; the stack would be corrupted -> hang/reboot.
+	; Page 10 is never touched by kernel reads (loaded to KERN_PAGE_BASE..+7).
 	ld	(drive_num), a		; save boot drive passed by BIOS in A
-	; NOTE: do NOT touch port 0x7C (SYS_PORT_ON) here -- BIOS already set up
-	; native mode and memory windows.  Writing 0x1D would remap WIN0 away from
-	; ROM, breaking RST 0x18 calls.
+	xor	a
+	out	(SYS_PORT_ON), a	; keep BIOS system mode without changing CNF bits
+
+	ld	a, (drive_num)
+	ld	c, #DRV_RESET
+	rst	0x18
+	jp	c, boot_error
 
 	; Initialise loop state
 	xor	a
 	ld	(page_num), a
+	ld	(read_mode), a
 	ld	hl, #KERN_LBA_START
 	ld	(cur_lba), hl
 
@@ -122,19 +126,13 @@ boot_start:
 	call	print_char
 
 ; =============================================================================
-; Load loop: read kernel pages 0..KERN_PAGES-1 using BIOS DRV_LREAD (#52)
+; Load loop: read kernel pages 0..KERN_PAGES-1 using BIOS DRV_READ (#55)
 ;
-; BIOS C=#52 (CLREAD -> LREADH in HDRIVER6.ASM):
-;   A  = drive number (#80)
-;   A' = physical page number to load into (set via EX AF,AF' before call)
-;   HL = LBA high word (0)
-;   IX = LBA low word (sector number)
-;   DE = buffer address in WIN3 range (#C000)
-;   B  = sector count (32)
-;   C  = #52
+; For each page:
+;   1) map page N into WIN1 (MPGSEL_1)
+;   2) read 32 sectors to 0x4000 (WIN1 base)
 ;
-; BIOS internally remaps WIN3 to the physical page in A' and reads via INI.
-; Our stack is in WIN2 (page 10) -- not affected by WIN3 remapping.
+; This keeps all reads away from the boot sector in WIN2.
 ; =============================================================================
 load_next:
 	; Print page digit before loading
@@ -142,19 +140,58 @@ load_next:
 	add	a, #'0'
 	call	print_char
 
-	; A' = physical page number (consumed by LREADH via RDS000/PRESET)
+	; Map target kernel page into WIN1.
 	ld	a, (page_num)
-	ex	af, af'
+	add	a, #KERN_PAGE_BASE
+	out	(MPGSEL_1), a
 
-	; Set up LREAD parameters and call BIOS via RST #18
-	ld	hl, #0			; HL = LBA high word (0 for disk < 64K sectors)
-	ld	ix, (cur_lba)		; IX = LBA low word (sector number)
-	ld	de, #0xC000		; DE = buffer at WIN3 base (BIOS maps WIN3 to page A')
+	; Set up READ parameters and call BIOS via RST #18.
+	; read_mode = 0: HL=high, IX=low (BIOS sources: DSETUP + HDRIVER6)
+	; read_mode = 1: HL=low,  IX=high (fallback for alternate firmware docs)
+	ld	a, (read_mode)
+	or	a
+	jr	nz, read_params_alt
+	ld	hl, #0			; HL = LBA high word
+	ld	ix, (cur_lba)		; IX = LBA low word
+	jr	read_params_ready
+read_params_alt:
+	ld	hl, (cur_lba)		; HL = LBA low word (fallback mode)
+	ld	ix, #0			; IX = LBA high word
+read_params_ready:
+	ld	de, #0x4000		; DE = buffer in WIN1 (currently mapped to page N)
 	ld	b, #SECTS_PER_PAGE	; B  = 32 sectors (16 KB)
-	ld	c, #DRV_LREAD		; C  = #52 (Long Read with explicit page in A')
+	ld	c, #DRV_READ		; C  = #55
 	ld	a, (drive_num)		; A  = drive
 	rst	0x18			; BIOS internal call (boot-sector vector)
-	jr	c, boot_error		; CF=1 -> disk read failed
+	jp	c, boot_error		; CF=1 -> disk read failed
+
+	; One-time sanity probe on page 0:
+	; if data at 0x4000 begins with "Starting...",0 then we loaded the
+	; boot sector instead of kernel page 0. Switch register mapping mode
+	; and retry page 0 without advancing LBA/page counters.
+	ld	a, (page_num)
+	or	a
+	jr	nz, read_ok
+	ld	a, (read_mode)
+	or	a
+	jr	nz, read_ok
+	ld	hl, #0x4000
+	ld	de, #0x8000
+	ld	b, #12
+read_probe:
+	ld	a, (de)
+	cp	(hl)
+	jr	nz, read_ok
+	inc	hl
+	inc	de
+	djnz	read_probe
+	ld	a, #1
+	ld	(read_mode), a
+	ld	a, #'M'
+	call	print_char
+	jr	load_next
+
+read_ok:
 
 	; Advance LBA for the next page
 	ld	hl, (cur_lba)
@@ -170,13 +207,13 @@ load_next:
 	jr	nz, load_next
 
 ; =============================================================================
-; All pages loaded.  Map kernel page 0 to WIN0 and enter the kernel.
-; crt0.s (init:) will remap WIN1=1, WIN2=2, WIN3=3 before calling fuzix_main.
+; All pages loaded.  Map kernel image page 0 to WIN0 and enter the kernel.
+; crt0.s (init:) remaps WIN1..WIN3 to KERN_PAGE_BASE+1..+3.
 ; =============================================================================
 	ld	a, #'>'			; signal: jumping to kernel
 	call	print_char
-	xor	a
-	out	(MPGSEL_0), a		; WIN0 -> page 0 (kernel init at 0x0100)
+	ld	a, #KERN_PAGE_BASE
+	out	(MPGSEL_0), a		; WIN0 -> kernel image page 0 (init at 0x0100)
 	jp	PROGLOAD
 
 ; =============================================================================
@@ -209,3 +246,9 @@ page_num:
 	.db	0			; current page index (0..KERN_PAGES-1)
 cur_lba:
 	.dw	KERN_LBA_START		; current disk LBA (low 16 bits)
+read_mode:
+	.db	0			; 0=HL:IX (normal), 1=HL low fallback
+
+	.org	0x81FE
+	.db	0x55
+	.db	0xAA

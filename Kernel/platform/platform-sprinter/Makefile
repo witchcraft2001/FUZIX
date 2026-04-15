@@ -60,7 +60,9 @@ mbr.bin:
 boot.bin: boot.s
 	sdasz80 -o boot.s
 	sdldz80 -i boot.rel
-	makebin -s 0x8200 -o 0x8000 boot.ihx > boot.bin
+	makebin -s 33280 boot.ihx boot.full
+	dd if=boot.full of=boot.bin bs=1 skip=32768 count=512 status=none
+	rm -f boot.full
 
 #
 #	Build the kernel binary image (8 pages, 128 KB)
@@ -74,8 +76,8 @@ image: mbr.bin boot.bin
 	#   bank2.bin   0x4000-0x7FFF = page 4 (CODE2; page 5 is empty)
 	#   bank3.bin   0x4000-0x7FFF = page 6 (CODE3; page 7 is empty)
 	# Pages 5 and 7 must be present as zero-filled pages to keep hardware
-	# page numbers aligned with disk sector offsets (boot.s maps sector N
-	# directly to hardware page N).
+	# page numbers aligned with image page offsets (boot.s maps image page N
+	# to physical page KERN_PAGE_BASE+N).
 	dd if=../../common.bin bs=16384 count=1 conv=sync > fuzix.sprinter
 	dd if=../../bank1.bin  bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
 	dd if=../../common.bin bs=16384 skip=3 count=1 conv=sync >> fuzix.sprinter

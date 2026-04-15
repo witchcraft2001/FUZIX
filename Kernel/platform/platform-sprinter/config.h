@@ -24,13 +24,13 @@
 #define CONFIG_LARGE_IO_DIRECT(x)	1
 /*
  * 256 total 16K pages in 4MB RAM.
- * Reserve pages 0-7 for kernel (CODE, 3 code banks, common):
- *   0 = WIN0 (CODE), 1-2 = bank1, 3 = common,
- *   4-5 = bank2, 6-7 = bank3
+ * Reserve high RAM pages 0x48-0x4F for kernel (CODE, 3 code banks, common):
+ *   0x48 = WIN0 (CODE), 0x49-0x4A = bank1, 0x4B = common,
+ *   0x4C-0x4D = bank2, 0x4E-0x4F = bank3
  * Skip VRAM pages 0x50-0x5F.
- * User pages: 8-79 (0x08-0x4F) = 72 user pages.
+ * User pages: 8-71 (0x08-0x47) = 64 user pages.
  */
-#define MAX_MAPS	72
+#define MAX_MAPS	64
 /* Banked kernel */
 #define CONFIG_BANKED
 /* Banks as reported to user space */

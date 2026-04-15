@@ -55,18 +55,18 @@ init:
 	di
 
 	; Set up Sprinter native mode
-	ld a, #0x1D
+	xor a
 	out (SYS_PORT_ON), a
 
 	; Setup the memory paging for kernel
-	; Kernel: page 0 = WIN0 (CODE), pages 1,2 = WIN1,WIN2 (bank1),
-	;         page 3 = WIN3 (common)
-	; Page 0 already mapped to WIN0 (we are running from it)
-        ld a, #1
+	; Kernel base pages: 0x48 = WIN0 (CODE), 0x49/0x4A = bank1,
+	;                    0x4B = WIN3 (common)
+	; WIN0 already points at 0x48 (set by boot loader)
+        ld a, #0x49
         out (MPGSEL_1), a       ; map page 1 at 0x4000 (bank1 low)
-        ld a, #2
+        ld a, #0x4A
         out (MPGSEL_2), a       ; map page 2 at 0x8000 (bank1 high)
-	ld a, #3
+	ld a, #0x4B
         out (MPGSEL_3), a       ; map page 3 at 0xC000 (common)
 
         ; switch to stack in common memory
