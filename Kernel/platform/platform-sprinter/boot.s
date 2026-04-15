@@ -54,7 +54,8 @@
 ; ---- Port constants (must match kernel.def) ---------------------------------
 MPGSEL_0	.equ	0x82	; WIN0 page select (0x0000-0x3FFF)
 MPGSEL_1	.equ	0xA2	; WIN1 page select (0x4000-0x7FFF)
-SYS_PORT_ON	.equ	0x7C	; Enable Sprinter native mode
+SYS_PORT_ON	.equ	0x7C	; Enter BIOS system mode
+SYS_PORT_OFF	.equ	0x3C	; Leave BIOS system mode / no ROM overlay in WIN0
 
 ; ---- BIOS API ---------------------------------------------------------------
 DRV_RESET	.equ	0x51	; Reset drive
@@ -212,6 +213,8 @@ read_ok:
 ; =============================================================================
 	ld	a, #'>'			; signal: jumping to kernel
 	call	print_char
+	xor	a
+	out	(SYS_PORT_OFF), a	; switch out of BIOS system mode before kernel jump
 	ld	a, #KERN_PAGE_BASE
 	out	(MPGSEL_0), a		; WIN0 -> kernel image page 0 (init at 0x0100)
 	jp	PROGLOAD

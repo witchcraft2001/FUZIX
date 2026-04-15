@@ -54,9 +54,9 @@
 init:
 	di
 
-	; Set up Sprinter native mode
+	; Leave BIOS system mode so WIN0 uses RAM mapping
 	xor a
-	out (SYS_PORT_ON), a
+	out (SYS_PORT_OFF), a
 
 	; Setup the memory paging for kernel
 	; Kernel base pages: 0x48 = WIN0 (CODE), 0x49/0x4A = bank1,
