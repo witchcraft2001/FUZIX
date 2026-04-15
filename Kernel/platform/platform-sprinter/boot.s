@@ -57,7 +57,8 @@ SYS_PORT_ON	.equ	0x7C	; Enable Sprinter native mode
 
 ; ---- BIOS API ---------------------------------------------------------------
 DRV_RESET	.equ	0x51	; Reset drive
-DRV_READ	.equ	0x55	; Read sectors from drive
+DRV_LREAD	.equ	0x52	; Long read: A=drive, A'=phys page, HL:IX=LBA, DE=buf, B=count
+DRV_READ	.equ	0x55	; Read sectors (uses current WIN3 page)
 
 ; ---- Disk / kernel layout ---------------------------------------------------
 KERN_LBA_START	.equ	2	; First kernel sector (0=MBR, 1=boot sector)
@@ -94,13 +95,20 @@ IDE0_DRIVE	.equ	0x80	; IDE 0 master
 ;   Returns: CF=0 success, CF=1 error
 ; (Source: HDRIVER6.ASM LREADH/READH; DOSBOOT4.asm uses same convention)
 ; =============================================================================
+; ---- BIOS console print (boot-sector context) --------------------------------
+; LP_PRINT_SYM via RST #18: A = char, B = 1, C = #82
+LP_PRINT_SYM	.equ	0x82
+
 boot_start:
 	di
+	ld	sp, #0xBFF0		; stack in WIN2 (page 10, our boot sector page)
+	; Page 10 is never overwritten by DRV_LREAD (loads pages 0-7 only).
+	; If SP were in WIN3 (page 0) and BIOS remapped WIN3 during LREAD,
+	; the stack would be corrupted -> hang/reboot.
 	ld	(drive_num), a		; save boot drive passed by BIOS in A
-
-	; Activate Sprinter native mode so banking ports respond
-	ld	a, #0x1D
-	out	(SYS_PORT_ON), a
+	; NOTE: do NOT touch port 0x7C (SYS_PORT_ON) here -- BIOS already set up
+	; native mode and memory windows.  Writing 0x1D would remap WIN0 away from
+	; ROM, breaking RST 0x18 calls.
 
 	; Initialise loop state
 	xor	a
@@ -108,20 +116,42 @@ boot_start:
 	ld	hl, #KERN_LBA_START
 	ld	(cur_lba), hl
 
+	ld	a, #'F'			; "FUZIX" banner
+	call	print_char
+	ld	a, #':'
+	call	print_char
+
 ; =============================================================================
-; Load loop: read kernel pages 0..KERN_PAGES-1 into RAM via WIN1
+; Load loop: read kernel pages 0..KERN_PAGES-1 using BIOS DRV_LREAD (#52)
+;
+; BIOS C=#52 (CLREAD -> LREADH in HDRIVER6.ASM):
+;   A  = drive number (#80)
+;   A' = physical page number to load into (set via EX AF,AF' before call)
+;   HL = LBA high word (0)
+;   IX = LBA low word (sector number)
+;   DE = buffer address in WIN3 range (#C000)
+;   B  = sector count (32)
+;   C  = #52
+;
+; BIOS internally remaps WIN3 to the physical page in A' and reads via INI.
+; Our stack is in WIN2 (page 10) -- not affected by WIN3 remapping.
 ; =============================================================================
 load_next:
-	; Point WIN1 at the RAM page we are about to fill
+	; Print page digit before loading
 	ld	a, (page_num)
-	out	(MPGSEL_1), a
+	add	a, #'0'
+	call	print_char
 
-	; Set up DRV_READ parameters and call BIOS via RST #18
+	; A' = physical page number (consumed by LREADH via RDS000/PRESET)
+	ld	a, (page_num)
+	ex	af, af'
+
+	; Set up LREAD parameters and call BIOS via RST #18
 	ld	hl, #0			; HL = LBA high word (0 for disk < 64K sectors)
 	ld	ix, (cur_lba)		; IX = LBA low word (sector number)
-	ld	de, #0x4000		; DE = buffer at WIN1 base
+	ld	de, #0xC000		; DE = buffer at WIN3 base (BIOS maps WIN3 to page A')
 	ld	b, #SECTS_PER_PAGE	; B  = 32 sectors (16 KB)
-	ld	c, #DRV_READ		; C  = #55
+	ld	c, #DRV_LREAD		; C  = #52 (Long Read with explicit page in A')
 	ld	a, (drive_num)		; A  = drive
 	rst	0x18			; BIOS internal call (boot-sector vector)
 	jr	c, boot_error		; CF=1 -> disk read failed
@@ -143,15 +173,32 @@ load_next:
 ; All pages loaded.  Map kernel page 0 to WIN0 and enter the kernel.
 ; crt0.s (init:) will remap WIN1=1, WIN2=2, WIN3=3 before calling fuzix_main.
 ; =============================================================================
+	ld	a, #'>'			; signal: jumping to kernel
+	call	print_char
 	xor	a
 	out	(MPGSEL_0), a		; WIN0 -> page 0 (kernel init at 0x0100)
 	jp	PROGLOAD
 
 ; =============================================================================
-; Disk read error: hang (no reliable console at this stage)
+; Disk read error: print 'E' + page digit and hang
 ; =============================================================================
 boot_error:
-	jr	boot_error
+	ld	a, #'E'
+	call	print_char
+	ld	a, (page_num)
+	add	a, #'0'
+	call	print_char
+boot_hang:
+	jr	boot_hang
+
+; =============================================================================
+; print_char: print character in A via BIOS LP_PRINT_SYM (RST #18)
+; Clobbers: BC
+; =============================================================================
+print_char:
+	ld	bc, #0x0100 | LP_PRINT_SYM	; B=1 (count), C=#82 (LP_PRINT_SYM)
+	rst	0x18
+	ret
 
 ; =============================================================================
 ; Variables -- packed into the boot sector itself (well within 510 bytes)
