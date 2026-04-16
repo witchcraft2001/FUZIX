@@ -11,6 +11,7 @@
 	.globl map_kernel_restore
 	.globl map_proc
 	.globl map_proc_save
+	.globl map_proc_save_u
 	.globl map_buffers
 	.globl map_kernel_di
 	.globl map_proc_di
@@ -18,6 +19,7 @@
 	.globl map_proc_always_di
 	.globl map_save_kernel
 	.globl map_restore
+	.globl map_kernel_restore_u
 	.globl map_for_swap
 	.globl plt_interrupt_all
 	.globl _copy_common
@@ -31,6 +33,7 @@
 	.globl _sprinter_trace_last
 	.globl _sprinter_trace_idx
 	.globl _sprinter_trace_buf
+	.globl _sprinter_dbg
 
         ; imported symbols
         .globl _ramsize
@@ -126,18 +129,62 @@ plt_interrupt_all:
 ;=========================================================================
 _program_vectors:
 	di
-	pop bc				; bank
-	pop de				; temporarily store return address
-	pop hl				; function argument -- base page number
-	push hl				; put stack back as it was
-	push de
-	push bc
-
+	; SDCC banked call sites push AF (noopt) before calling this helper,
+	; so argument pointer (&u_page) is at SP+4.
+	ld hl, #4
+	add hl, sp
+	ld e, (hl)
+	inc hl
+	ld d, (hl)
+	call pv_ptr_valid
+	jr c, pv_arg_ok
+	xor a
+	ld d, a
+	ld e, a
+pv_arg_ok:
+	ex de, hl
+	ld (pv_oldsp), sp
+	ld sp, #pv_stack_top		; temporary stack in common memory
 	call map_proc
-
 	call do_program_vectors
+	call map_kernel_restore
+	ld sp, (pv_oldsp)
+	ret
 
-	jp map_kernel_restore
+; Validate pointer to process page map (4 bytes: page0..page3).
+; IN: DE = pointer
+; OUT: C=1 if valid, C=0 if invalid
+pv_ptr_valid:
+	ld a, d
+	or e
+	jr z, pv_ptr_ok			; NULL means kernel mapping
+	ld a, d
+	cp #0x80
+	jr nc, pv_ptr_bad
+	push hl
+	push bc
+	ld h, d
+	ld l, e
+	ld b, #4
+pv_ptr_loop:
+	ld a, (hl)
+	cp #0x08
+	jr c, pv_ptr_bad_pop
+	cp #0x80
+	jr nc, pv_ptr_bad_pop
+	inc hl
+	djnz pv_ptr_loop
+	pop bc
+	pop hl
+pv_ptr_ok:
+	scf
+	ret
+pv_ptr_bad_pop:
+	pop bc
+	pop hl
+pv_ptr_bad:
+	or a
+	ret
 
 
 do_program_vectors:
@@ -224,6 +271,7 @@ map_buffers:
 map_kernel_restore:
 map_kernel_di:
 	push hl
+	call sanitize_kpages
 	ld hl, #_kernel_pages
         jr map_proc_2_pophl_ret
 
@@ -253,6 +301,24 @@ map_proc_2:
 	pop de
 	ret
 
+sanitize_kpages:
+	ld a, (_kernel_pages + 1)
+	cp #0x08
+	jr c, sanitize_kpages_bad
+	cp #0x80
+	jr nc, sanitize_kpages_bad
+	ld a, (_kernel_pages + 2)
+	cp #0x08
+	jr c, sanitize_kpages_bad
+	cp #0x80
+	jr nc, sanitize_kpages_bad
+	ret
+sanitize_kpages_bad:
+	ld hl, #MAP_BANK1
+	ld (_kernel_pages + 1), hl
+	ld (mpgsel_cache + 1), hl
+	ret
+
 ;=========================================================================
 ; map_restore - restore a saved page mapping
 ;=========================================================================
@@ -274,6 +340,23 @@ map_save_kernel:
 	ld hl, (mpgsel_cache+2)
 	ld (map_savearea+2), hl
 	ld hl, #_kernel_pages
+	jr map_proc_2_pophl_ret
+
+;=========================================================================
+; map_proc_save_u / map_kernel_restore_u - usermem private save/restore
+;=========================================================================
+map_proc_save_u:
+	push hl
+	ld hl, (mpgsel_cache)
+	ld (map_savearea_user), hl
+	ld hl, (mpgsel_cache+2)
+	ld (map_savearea_user+2), hl
+	ld hl, #_udata + U_DATA__U_PAGE
+	jr map_proc_2_pophl_ret
+
+map_kernel_restore_u:
+	push hl
+	ld hl, #map_savearea_user
 	jr map_proc_2_pophl_ret
 
 ;=========================================================================
@@ -414,6 +497,7 @@ bank0:
 	call callhl
 	ld bc, #MAP_BANK3
 banksetbc:
+	call sanitize_bc_map
 	ld (_kernel_pages + 1), bc
 	ld (mpgsel_cache + 1), bc
 	ld a, c
@@ -508,6 +592,7 @@ stub_call:
 	pop hl
 	ex (sp), hl
 	ld a, (_kernel_pages+1)
+	call sanitize_bc_map
 	ld (_kernel_pages+1), bc
 	ld (mpgsel_cache + 1), bc
 	ld b, a
@@ -528,6 +613,7 @@ stub_call:
 stub_ret_2:
 	ld bc, #MAP_BANK2
 stub_ret:
+	call sanitize_bc_map
 	ld (_kernel_pages+1), bc
 	ld (mpgsel_cache + 1), bc
 	ld a, c
@@ -545,6 +631,22 @@ stub_ret_1:
 
 callhl:	jp (hl)
 
+sanitize_bc_map:
+	ld a, c
+	cp #0x08
+	jr c, sanitize_bc_default
+	cp #0x80
+	jr nc, sanitize_bc_default
+	ld a, b
+	cp #0x08
+	jr c, sanitize_bc_default
+	cp #0x80
+	jr nc, sanitize_bc_default
+	ret
+sanitize_bc_default:
+	ld bc, #MAP_BANK1
+	ret
+
 	.area _COMMONDATA
 
 mpgsel_cache:
@@ -559,6 +661,9 @@ _kernel_pages:
 map_savearea:
 	.db 0, 0, 0, 0		; saved mapping
 
+map_savearea_user:
+	.db 0, 0, 0, 0		; usermem private saved mapping
+
 _int_disabled:
 	.db 1
 
@@ -570,3 +675,13 @@ _sprinter_trace_idx:
 
 _sprinter_trace_buf:
 	.ds 32
+
+_sprinter_dbg:
+	.ds 16
+
+pv_oldsp:
+	.dw 0
+
+pv_stack:
+	.ds 256
+pv_stack_top:

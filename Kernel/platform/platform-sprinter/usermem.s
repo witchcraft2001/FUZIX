@@ -24,8 +24,8 @@
 
 	.globl _udata
 
-	.globl  map_proc_save
-	.globl  map_kernel_restore
+	.globl  map_proc_save_u
+	.globl  map_kernel_restore_u
 
 	.globl mpgsel_cache
 
@@ -49,7 +49,7 @@ __uzero:
 	ld a, b	; check for 0 copy
 	or c
 	ret z
-	call map_proc_save
+	call map_proc_save_u
 	ld (hl), #0
 	dec bc
 	ld a, b
@@ -70,11 +70,11 @@ __uputc:
 	push de
 	push bc
 	push iy
-	call map_proc_save
+	call map_proc_save_u
 	ld (hl), e
 uputc_out:
 	ld hl, #0
-	jp map_kernel_restore
+	jp map_kernel_restore_u
 
 __uputw:
 	pop iy
@@ -85,25 +85,25 @@ __uputw:
 	push de
 	push bc
 	push iy
-	call map_proc_save
+	call map_proc_save_u
 	ld (hl), e
 	inc hl
 	ld (hl), d
 	jr uputc_out
 
 __ugetc:
-	call map_proc_save
+	call map_proc_save_u
         ld l, (hl)
 	ld h, #0
-	jp map_kernel_restore
+	jp map_kernel_restore_u
 
 __ugetw:
-	call map_proc_save
+	call map_proc_save_u
         ld a, (hl)
 	inc hl
 	ld h, (hl)
 	ld l, a
-	jp map_kernel_restore
+	jp map_kernel_restore_u
 
 ;
 ;	General helper to get the C arguments off the stack.
@@ -169,7 +169,7 @@ uput_next:
 	call user_map_de
 copy_and_out:
 	ldir
-	call map_kernel_restore
+	call map_kernel_restore_u
 uput_out:
 	pop ix
 	ld hl, #0

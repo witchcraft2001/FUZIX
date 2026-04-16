@@ -317,6 +317,13 @@ int tty_carrier(uint_fast8_t minor)
 	return 1;
 }
 
+int sprinter_tty_open(uint_fast8_t minor, uint16_t flag)
+{
+	if (minor <= NUM_DEV_TTY)
+		ttydata[minor].flag &= ~TTYF_DEAD;
+	return tty_open(minor, flag | O_NDELAY | O_NOCTTY);
+}
+
 void tty_sleeping(uint_fast8_t minor)
 {
 	minor;

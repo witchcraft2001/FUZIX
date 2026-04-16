@@ -4,6 +4,7 @@
         .include "../../cpu-z80/kernel-z80.def"
 
 TOP_PORT	.equ	MPGSEL_3
+MAP_BANK1	.equ	0x4A49
 
         .globl _ptab_alloc
         .globl _makeproc
@@ -23,6 +24,7 @@ TOP_PORT	.equ	MPGSEL_3
 	.globl _int_disabled
 	.globl _udata
 	.globl _kernel_pages
+	.globl mpgsel_cache
 	.globl map_kernel_restore
 	.globl _get_common
 	.globl _swap_finish
@@ -137,9 +139,23 @@ notswapped:
 
 	; ---- New task stack ----
 
-        pop iy
-        pop ix
+	pop iy
+	pop ix
 	pop hl
+	ld a, l
+	cp #0x08
+	jr c, bad_kpages
+	cp #0x80
+	jr nc, bad_kpages
+	ld a, h
+	cp #0x08
+	jr c, bad_kpages
+	cp #0x80
+	jr nc, bad_kpages
+	jr kpages_ok
+bad_kpages:
+	ld hl, #MAP_BANK1
+kpages_ok:
 	ld (_kernel_pages + 1), hl
 	call map_kernel_restore
 

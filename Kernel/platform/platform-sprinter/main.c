@@ -31,8 +31,10 @@ uint_fast8_t plt_param(unsigned char *p)
 
 void plt_interrupt(void)
 {
-	kbd_poll();
-	timer_interrupt();
+	/*
+	 * Temporary bring-up mode: avoid scheduler/timer activity while
+	 * early Sprinter memory mapping is being stabilized.
+	 */
 }
 
 /*
