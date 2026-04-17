@@ -4,34 +4,136 @@
 #include <tinyide.h>
 #include "plt_ide.h"
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define IDE_TRACE(x) plt_trace(x)
+#else
+#define IDE_TRACE(x) do { } while (0)
+#endif
+
 #ifdef CONFIG_TD_IDE
 
 uint8_t ide_present = 0;
 uint8_t ide_unit;
+static uint8_t ide_wait_last_status;
+static uint8_t ide_8bit_mode;
+
+static int ide_wait_mask(uint8_t mask, uint8_t val)
+{
+	uint16_t t = 0x2000;
+	uint8_t st;
+
+	do {
+		st = ide_read(status);
+		ide_wait_last_status = st;
+		if ((st & mask) == val)
+			return 0;
+	} while (--t);
+
+	return -1;
+}
 
 int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
 {
+    uint8_t devsel;
+    uint8_t lba0;
+    uint8_t lba1;
+    uint8_t lba2;
+
     ide_unit = dev;
-    while(ide_read(status) & 0x80);	/* Wait !BUSY */
-    ide_write(devh, (ide_unit & 1) ? 0xF0 : 0xE0) ;	/* LBA, device */
-    while(ide_read(status) & 0x80);	/* Wait !BUSY */
+    IDE_TRACE(0x80);
+    lba0 = lba;
+    lba1 = lba >> 8;
+    lba2 = lba >> 16;
+    /* Bring-up: force master + LBA mode explicitly. */
+    devsel = 0xE0;
+    ide_write(devh, devsel) ;	/* LBA, device */
+    IDE_TRACE(0x88);
+    IDE_TRACE(0x90);
+    IDE_TRACE(devsel);
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    IDE_TRACE(0x94);
+    if (!ide_wait_mask(0x80, 0x00)) {
+      ide_write(error, 0x01);
+      ide_write(cmd, 0xEF);
+      if (!ide_wait_mask(0x80, 0x00)) {
+        uint8_t st = ide_read(status);
+        IDE_TRACE(0x96);
+        IDE_TRACE(st);
+        if (!(st & 0x01)) {
+          ide_8bit_mode = 1;
+          IDE_TRACE(0x95);
+        } else {
+          IDE_TRACE(0x97);
+          IDE_TRACE(ide_read(error));
+        }
+      } else {
+        IDE_TRACE(0x98);
+        IDE_TRACE(ide_wait_last_status);
+      }
+    } else {
+      IDE_TRACE(0x99);
+      IDE_TRACE(ide_wait_last_status);
+    }
+#endif
+    if (ide_wait_mask(0x80, 0x00)) {
+      IDE_TRACE(0x81);
+      IDE_TRACE(ide_wait_last_status);
+    }
+    if (ide_wait_mask(0x80, 0x00)) {
+      IDE_TRACE(0x82);
+      IDE_TRACE(ide_wait_last_status);
+      return 0;
+    }
 
     /* FIXME upper 4 bits */
-    ide_write(cylh, lba >> 16);
-    ide_write(cyll, lba >> 8);
-    ide_write(sec, lba);
+    ide_write(cylh, lba2);
+    ide_write(cyll, lba1);
+    ide_write(sec, lba0);
     ide_write(count, 1);
-    while(!(ide_read(status) & 0x40));	/* Wait DRDY */
+    IDE_TRACE(0x89);
+    IDE_TRACE(0x91);
+    IDE_TRACE(lba0);
+    IDE_TRACE(0x92);
+    IDE_TRACE(lba1);
+    IDE_TRACE(0x93);
+    IDE_TRACE(lba2);
+    if (ide_wait_mask(0x40, 0x40)) {
+      IDE_TRACE(0x83);
+      IDE_TRACE(ide_wait_last_status);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+      /* Sprinter bring-up: some controllers never raise DRDY reliably. */
+      IDE_TRACE(0x8C);
+#else
+      return 0;
+#endif
+    }
     ide_write(cmd, is_read ? 0x20 : 0x30);
-    while(!(ide_read(status) & 0x08));	/* Wait DRQ */
+    IDE_TRACE(0x8A);
+    if (ide_wait_mask(0x08, 0x08)) {
+      IDE_TRACE(0x84);
+      IDE_TRACE(ide_wait_last_status);
+      IDE_TRACE(0x8D);
+      IDE_TRACE(ide_read(error));
+      return 0;
+    }
     if (is_read)
       devide_read_data(dptr);
     else
       devide_write_data(dptr);
 
-    while(ide_read(status) & 0x80);	/* Wait !BUSY */
-    if (ide_read(status) & 0x01)	/* Error */
+    IDE_TRACE(0x8B);
+    if (ide_wait_mask(0x80, 0x00)) {
+      IDE_TRACE(0x85);
+      IDE_TRACE(ide_wait_last_status);
       return 0;
+    }
+    if (ide_read(status) & 0x01) {	/* Error */
+      IDE_TRACE(0x86);
+      return 0;
+    }
+    IDE_TRACE(0x87);
     return 1;
 }
 

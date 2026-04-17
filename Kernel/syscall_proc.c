@@ -1,6 +1,12 @@
 #include <kernel.h>
 #include <kdata.h>
 #include <printf.h>
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define PROC_SYSC_TRACE(x) plt_trace(x)
+#else
+#define PROC_SYSC_TRACE(x) do { } while (0)
+#endif
 
 #undef DEBUG
 
@@ -383,6 +389,20 @@ int16_t val;
 arg_t __exit(void)
 {
 	/* Deliberately chop to 8bits */
+	PROC_SYSC_TRACE(0xCB);
+	PROC_SYSC_TRACE((uint8_t)val);
+	PROC_SYSC_TRACE((uint8_t)(val >> 8));
+	PROC_SYSC_TRACE((uint8_t)udata.u_ptab->p_pid);
+	PROC_SYSC_TRACE((uint8_t)udata.u_ptab->p_status);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Bring-up safety: avoid killing PID 1 while tracing early userland. */
+	if (udata.u_ptab->p_pid == 1) {
+		PROC_SYSC_TRACE(0xCC);
+		PROC_SYSC_TRACE((uint8_t)udata.u_ptab->p_pid);
+		PROC_SYSC_TRACE((uint8_t)udata.u_ptab->p_status);
+		doexit(val << 8);
+	}
+#endif
 	doexit(val << 8);
 	return 0;		// ... yeah. that might not happen.
 }

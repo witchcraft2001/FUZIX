@@ -12,6 +12,17 @@
 #define _TINYDISK_PRIVATE
 #include <tinydisk.h>
 
+#ifdef CONFIG_TD_IDE
+extern int ide_xfer(uint_fast8_t unit, bool is_read, uint32_t lba, uint8_t *dptr);
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define TD_TRACE(x) plt_trace(x)
+#else
+#define TD_TRACE(x) do { } while (0)
+#endif
+
 /* Used by the asm helpers */
 uint8_t td_page;
 uint8_t td_raw;
@@ -22,6 +33,9 @@ td_ioc td_iop[CONFIG_TD_NUM];
 
 static int td_transfer(uint8_t minor, bool is_read, uint8_t rawflag)
 {
+	TD_TRACE(0x77);
+	TD_TRACE(0x78);
+	TD_TRACE(rawflag);
 	uint8_t dev = minor >> 4;
 	register uint16_t ct = 0;
 	register uint8_t *dptr;
@@ -29,13 +43,18 @@ static int td_transfer(uint8_t minor, bool is_read, uint8_t rawflag)
 	uint32_t lba;
 
 	minor &= 0x0F;
+	TD_TRACE(0x7B);
+	if (dev >= CONFIG_TD_NUM || td_op[dev] == NULL) {
+		TD_TRACE(0x79);
+		goto fail;
+	}
 
 	td_page = 0;
 	td_raw = rawflag;
 	if (rawflag == 1) {
 		if (d_blkoff(BLKSHIFT))
 			return -1;
-		td_page = udata.u_page;	/* User space */
+		td_page = udata.u_page;
 	}
 #if defined(SWAPDEV) || defined(PAGEDEV)
 	else if (rawflag == 2)
@@ -49,26 +68,33 @@ static int td_transfer(uint8_t minor, bool is_read, uint8_t rawflag)
 	if (minor) {
 		if (minor <= CONFIG_TD_MAX_PART && td_lba[dev][minor])
 			lba += td_lba[dev][minor];
-		else
+		else {
+			TD_TRACE(0x79);
 			goto fail;
+		}
 	}
 
 	dptr = udata.u_dptr;
 	nblock = udata.u_nblock;
-
-	/* Here be dragons. In the swap case we will load over udata so watch
-	   we avoid udata. values */
+	TD_TRACE(0x7E);
 	while (ct < nblock) {
-		if (td_op[dev] (td_unit[dev], is_read, lba, dptr) == 0)
+		TD_TRACE(0x72);
+		if (dev == 0) {
+			TD_TRACE(0x7A);
+			if (ide_xfer(td_unit[dev], is_read, lba, dptr) == 0)
+				goto error;
+		} else if (td_op[dev] (td_unit[dev], is_read, lba, dptr) == 0)
 			goto error;
+		TD_TRACE(0x73);
 		ct++;
 		dptr += 512;
 		lba++;
 	}
 	return ct << 9;
 error:
-	kprintf("hd%c: I/O error\n", dev + 'a');
+	TD_TRACE(0x74);
 fail:
+	TD_TRACE(0x7F);
 	udata.u_error = EIO;
 	return -1;
 }
@@ -86,7 +112,16 @@ int td_open(uint_fast8_t minor, uint16_t flag)
 
 int td_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
-	return td_transfer(minor, true, rawflag);
+	int r;
+	TD_TRACE(0x70);
+	TD_TRACE((uint8_t)minor);
+	TD_TRACE(0x71);
+	TD_TRACE((uint8_t)rawflag);
+	TD_TRACE(0x75);
+	r = td_transfer(minor, true, rawflag);
+	TD_TRACE(0x76);
+	TD_TRACE((uint8_t)r);
+	return r;
 }
 
 int td_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)

@@ -3,13 +3,23 @@
 #include <kdata.h>
 #include <stdarg.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define DIO_TRACE(x) plt_trace(x)
+extern int td_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+#else
+#define DIO_TRACE(x) do { } while (0)
+#endif
+
 /* Error checking */
 
 void validchk(uint16_t dev, const char *p)
 {
+	(void)p;
         if (!validdev(dev)) {
-                kputs(p);
-                kputchar(':');
+                DIO_TRACE(0xDD);
+                DIO_TRACE((uint8_t)dev);
+                DIO_TRACE((uint8_t)(dev >> 8));
                 panic(PANIC_INVD);
         }
 }
@@ -84,17 +94,22 @@ static void bunlock(bufptr bp)
 bufptr bread(uint16_t dev, blkno_t blk, bool rewrite)
 {
 	regptr bufptr bp;
+	DIO_TRACE(0x64);
 
 	/* TODO speed up the bfind/freebuf into one pass */
 	if ((bp = bfind(dev, blk)) == NULL) {
+		DIO_TRACE(0x65);
 		bp = freebuf();
+		DIO_TRACE(0x66);
 		bp->bf_dev = dev;
 		bp->bf_blk = blk;
 
 		/* If rewrite is set, we are about to write over the entire block,
 		   so we don't need the previous contents */
 		if (!rewrite) {
+			DIO_TRACE(0x67);
 			if (bdread(bp) != BLKSIZE) {
+				DIO_TRACE(0x68);
 				udata.u_error = EIO;
 				/* Don't cache the failure */
 				bp->bf_dev = NO_DEVICE;
@@ -104,6 +119,8 @@ bufptr bread(uint16_t dev, blkno_t blk, bool rewrite)
 			}
 		}
 	}
+	else
+		DIO_TRACE(0x69);
 	return bp;
 }
 
@@ -293,6 +310,8 @@ bufptr freebuf(void)
 	   we sleep on something - buffer going unbusy or even the oldest
 	   buffer and then check if it's still old and if not retry */
 	if (!oldest)
+		DIO_TRACE(0x6A);
+	if (!oldest)
 		panic(PANIC_NOFREEB);
 
 	block(oldest);
@@ -335,8 +354,20 @@ static void bdsetup(bufptr bp)
 int bdread(bufptr bp)
 {
 	uint16_t dev = bp->bf_dev;
+	DIO_TRACE(0x60);
+	DIO_TRACE((uint8_t)dev);
+	DIO_TRACE(0x61);
+	DIO_TRACE((uint8_t)(dev >> 8));
 	validchk(dev, PANIC_BDR);
+	DIO_TRACE(0x62);
 	bdsetup(bp);
+	DIO_TRACE(0x63);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (major(dev) == 0) {
+		DIO_TRACE(0x6E);
+		return td_read(minor(dev), 0, 0);
+	}
+#endif
 	return ((*dev_tab[major(dev)].dev_read) (minor(dev), 0, 0));
 }
 

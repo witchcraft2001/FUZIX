@@ -4,6 +4,13 @@
 #include <printf.h>
 #include <exec.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define EX_TRACE(x) plt_trace(x)
+#else
+#define EX_TRACE(x) do { } while (0)
+#endif
+
 /* We don't share this routine between the exec routines as we optimise the
    8bit one differently */
 static void close_on_exec(void)
@@ -63,23 +70,140 @@ arg_t _execve(void)
 	uaddr_t bin_size;	/* Will need to be bigger on some cpus */
 	uaddr_t bss;
 	uint_fast8_t mflags;
+	uint8_t *exec_name;
+	uarg_t exec_name_ptr;
+	uint8_t exec_name_lo;
+	uint8_t exec_name_hi;
 
 	top = ramtop;
+	/* Minimal bring-up fallback: only when exec name pointer is missing. */
+	EX_TRACE(0xE8);
+	EX_TRACE((uint8_t)udata.u_argn);
+	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+	EX_TRACE((uint8_t)udata.u_ptab->p_pid);
+	if (((uint8_t)udata.u_argn) == 0 &&
+	    ((uint8_t)(((uarg_t)udata.u_argn) >> 8)) == 0) {
+		uptr_t initp = (uptr_t)(PROGLOAD + 256);
+		uptr_t argvp = (uptr_t)PROGLOAD;
+		EX_TRACE(0xEC);
+		uputc('/', (void *)initp);
+		uputc('i', (void *)(initp + 1));
+		uputc('n', (void *)(initp + 2));
+		uputc('i', (void *)(initp + 3));
+		uputc('t', (void *)(initp + 4));
+		uputc(0, (void *)(initp + 5));
+		uputp(initp, (void *)argvp);
+		uputp(0, (void *)(argvp + sizeof(uptr_t)));
+		udata.u_argn = (arg_t)initp;
+		udata.u_argn1 = (arg_t)argvp;
+		udata.u_argn2 = (arg_t)(argvp + sizeof(uptr_t));
+	}
+	EX_TRACE(0xE0);
+	EX_TRACE(0xE7);
+	EX_TRACE((uint8_t)udata.u_argn);
+	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+	exec_name_lo = (uint8_t)udata.u_argn;
+	exec_name_hi = (uint8_t)(((uarg_t)udata.u_argn) >> 8);
+	exec_name_ptr = (uarg_t)udata.u_argn;
+	exec_name = (uint8_t *)exec_name_ptr;
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	EX_TRACE(0xEA);
+	EX_TRACE((uint8_t)udata.u_argn);
+	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+	#endif
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	EX_TRACE(0xEB);
+	EX_TRACE((uint8_t)(uarg_t)exec_name);
+	EX_TRACE((uint8_t)(((uarg_t)exec_name) >> 8));
+	EX_TRACE(0xEF);
+	if ((uarg_t)exec_name) {
+		EX_TRACE((uint8_t)ugetc((void *)exec_name));
+		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 1)));
+		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 2)));
+		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 3)));
+		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 4)));
+		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 5)));
+	} else {
+		EX_TRACE(0);
+		EX_TRACE(0);
+		EX_TRACE(0);
+		EX_TRACE(0);
+		EX_TRACE(0);
+		EX_TRACE(0);
+	}
+	#endif
+	/* Last-chance bring-up fallback for missing exec name. */
+	if ((uarg_t)exec_name == 0) {
+		uptr_t initp = (uptr_t)(PROGLOAD + 256);
+		uptr_t argvp = (uptr_t)PROGLOAD;
+		EX_TRACE(0xEC);
+		uputc('/', (void *)initp);
+		uputc('i', (void *)(initp + 1));
+		uputc('n', (void *)(initp + 2));
+		uputc('i', (void *)(initp + 3));
+		uputc('t', (void *)(initp + 4));
+		uputc(0, (void *)(initp + 5));
+		uputp(initp, (void *)argvp);
+		uputp(0, (void *)(argvp + sizeof(uptr_t)));
+		udata.u_argn = (arg_t)initp;
+		udata.u_argn1 = (arg_t)argvp;
+		udata.u_argn2 = (arg_t)(argvp + sizeof(uptr_t));
+		exec_name = (uint8_t *)initp;
+	}
 
-	if (!(ino = n_open_lock(name, NULLINOPTR)))
+	if (!(ino = n_open_lock(exec_name, NULLINOPTR)))
+	{
+		EX_TRACE(0xE1);
+		EX_TRACE((uint8_t)udata.u_error);
 		return (-1);
+	}
+
+	EX_TRACE(0xE2);
+	EX_TRACE(0xEE);
+	EX_TRACE(((uint8_t *)ino)[0]);
+	EX_TRACE(((uint8_t *)ino)[1]);
+	EX_TRACE(((uint8_t *)ino)[2]);
+	EX_TRACE(((uint8_t *)ino)[3]);
+	EX_TRACE(((uint8_t *)ino)[4]);
+	EX_TRACE(((uint8_t *)ino)[5]);
+	EX_TRACE(((uint8_t *)ino)[6]);
+	EX_TRACE(((uint8_t *)ino)[7]);
+	EX_TRACE((uint8_t)(uarg_t)ino);
+	EX_TRACE((uint8_t)(((uarg_t)ino) >> 8));
+	EX_TRACE((uint8_t)ino->c_magic);
+	EX_TRACE((uint8_t)(ino->c_magic >> 8));
+	EX_TRACE((uint8_t)ino->c_dev);
+	EX_TRACE((uint8_t)(ino->c_dev >> 8));
+	EX_TRACE((uint8_t)ino->c_num);
+	EX_TRACE((uint8_t)(ino->c_num >> 8));
+	EX_TRACE((uint8_t)ino->c_node.i_mode);
+	EX_TRACE((uint8_t)(ino->c_node.i_mode >> 8));
 
 	if (!((getperm(ino) & OTH_EX) &&
 	      (ino->c_node.i_mode & F_REG) &&
 	      (ino->c_node.i_mode & (OWN_EX | OTH_EX | GRP_EX)))) {
+		EX_TRACE(0xE3);
+		EX_TRACE((uint8_t)getperm(ino));
+		EX_TRACE((uint8_t)ino->c_node.i_mode);
+		EX_TRACE((uint8_t)(ino->c_node.i_mode >> 8));
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		EX_TRACE(0xE5);
+	#else
 		udata.u_error = EACCES;
 		goto nogood;
+	#endif
 	}
 
 	mflags = fs_tab[ino->c_super].m_flags;
 	if (mflags & MS_NOEXEC) {
+		EX_TRACE(0xE4);
+		EX_TRACE((uint8_t)mflags);
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		EX_TRACE(0xE6);
+	#else
 		udata.u_error = EACCES;
 		goto nogood;
+	#endif
 	}
 
 	setftime(ino, A_TIME);
@@ -90,18 +214,40 @@ arg_t _execve(void)
 	udata.u_sysio = true;
 
 	readi(ino, 0);
+	EX_TRACE(0xED);
+	EX_TRACE((uint8_t)udata.u_done);
+	EX_TRACE((uint8_t)(((uarg_t)udata.u_done) >> 8));
+	EX_TRACE(((uint8_t *)&hdr)[0]);
+	EX_TRACE(((uint8_t *)&hdr)[1]);
+	EX_TRACE(((uint8_t *)&hdr)[2]);
+	EX_TRACE(((uint8_t *)&hdr)[3]);
 	if (udata.u_done != sizeof(struct exec)) {
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		if ((udata.u_done & 0x00FF) == sizeof(struct exec))
+			EX_TRACE(0xFA);
+		else {
+			udata.u_error = ENOEXEC;
+			goto nogood;
+		}
+	#else
 		udata.u_error = ENOEXEC;
 		goto nogood;
+	#endif
 	}
 
 	if (!header_ok(&hdr)) {
+		EX_TRACE(0xF1);
 		udata.u_error = ENOEXEC;
 		goto nogood2;
 	}
+	EX_TRACE(0xF2);
 
 	if (pagemap_prepare(&hdr) < 0)
+	{
+		EX_TRACE(0xF3);
 		goto nogood2;
+	}
+	EX_TRACE(0xF4);
 
 	progload = hdr.a_base << 8;
 	top = (hdr.a_base + hdr.a_size) << 8;
@@ -116,6 +262,7 @@ arg_t _execve(void)
 	bin_size = hdr.a_text + hdr.a_data;
 	/* Does it fit ? */
 	if (bin_size < hdr.a_text || top < progload || bin_size + bss < bin_size) {
+		EX_TRACE(0xF5);
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
@@ -127,6 +274,7 @@ arg_t _execve(void)
 #endif
 	progptr = bin_size + 1024 + bss;
 	if (bin_size < 64 || progload < PROGLOAD || top - progload < progptr || progptr < bin_size) {
+		EX_TRACE(0xF6);
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
@@ -145,13 +293,21 @@ arg_t _execve(void)
 
 	/* Read args and environment from process memory */
 	if (rargs(argv, abuf) || rargs(envp, ebuf))
+	{
+		EX_TRACE(0xF7);
 		goto nogood3;	/* SN */
+	}
+	EX_TRACE(0xF8);
 
 	/* This must be the last test as it makes changes if it works */
 	/* This is only safe from deadlocks providing pagemap_realloc doesn't
 	   sleep */
 	if (pagemap_realloc(&hdr, top - MAPBASE))
+	{
+		EX_TRACE(0xF9);
 		goto nogood3;
+	}
+	EX_TRACE(0xFA);
 
 #ifdef CONFIG_PLATFORM_UDMA
 	plt_udma_kill(udata.u_ptab);
@@ -208,10 +364,24 @@ arg_t _execve(void)
 
 	/* Should not be possible */
 	if (valaddr_r(udata.u_base, udata.u_count) != udata.u_count)
+	{
+		EX_TRACE(0xFB);
 		goto nogood4;
+	}
 	readi(ino, 0);
 	if (udata.u_done != bin_size)
+	{
+		EX_TRACE(0xFC);
+		EX_TRACE((uint8_t)udata.u_done);
+		EX_TRACE((uint8_t)(((uarg_t)udata.u_done) >> 8));
+		EX_TRACE(0xCE);
+		EX_TRACE((uint8_t)bin_size);
+		EX_TRACE((uint8_t)(((uarg_t)bin_size) >> 8));
+		EX_TRACE(0xCF);
+		EX_TRACE((uint8_t)udata.u_error);
 		goto nogood4;
+	}
+	EX_TRACE(0xFD);
 	progptr += bin_size;
 
 	/* Wipe the memory in the BSS. We don't wipe the memory above
@@ -260,22 +430,32 @@ arg_t _execve(void)
 	/* Start execution (never returns) */
 	udata.u_ptab->p_status = P_RUNNING;
 	doexec(progload + hdr.a_entry);
+	EX_TRACE(0xFE);
 
 	/* tidy up in various failure modes */
 nogood4:
+	EX_TRACE(0xD4);
+	EX_TRACE((uint8_t)udata.u_error);
 	/* Must not run userspace */
 	ssig(udata.u_ptab, SIGKILL);
 nogood3:
+	EX_TRACE(0xD3);
+	EX_TRACE((uint8_t)udata.u_error);
 	udata.u_ptab->p_status = P_RUNNING;
 	tmpfree(abuf);
 	tmpfree(ebuf);
 nogood2:
+	EX_TRACE(0xD2);
+	EX_TRACE((uint8_t)udata.u_error);
 nogood:
+	EX_TRACE(0xD1);
+	EX_TRACE((uint8_t)udata.u_error);
 	i_unlock_deref(ino);
+	EX_TRACE(0xD0);
+	EX_TRACE((uint8_t)udata.u_error);
 	return (-1);
 }
 
 #undef name
 #undef argv
 #undef envp
-

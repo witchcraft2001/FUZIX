@@ -19,6 +19,7 @@ cscope.*
 *~
 # Statistics from builds
 size.report
+Kernel/hogs.txt.old
 # Build system output
 .obj
 *.elf
@@ -72,4 +73,3 @@ Applications/games/2048/2048
 # Local agent guides (generated per contributor instructions)
 AGENTS.md
 CLAUDE.md
-Kernel/platform/platform-sprinter/fuzix.sprinter

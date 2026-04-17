@@ -3,6 +3,13 @@
 #include <kdata.h>
 #include <printf.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define FM_TRACE(x) plt_trace(x)
+#else
+#define FM_TRACE(x) do { } while (0)
+#endif
+
 /*
  * There are only two places in the core kernel that know about buffer
  * data and manipulate it directly. This is one of them, and  mm.c is the
@@ -1226,23 +1233,73 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     register struct filesys *fp;
     register bufptr buf;
 
-    if(d_open(dev, 0) != 0)
-        return NULL;    /* Bad device */
+    FM_TRACE(0x50);
+
+    if(d_open(dev, 0) != 0) {
+        FM_TRACE(0x51);
+        FM_TRACE((uint8_t)udata.u_error);
+        FM_TRACE(0x57);
+    }
+    FM_TRACE(0x52);
+    udata.u_error = 0;
+
+    FM_TRACE(0x5A);
+    FM_TRACE((uint8_t)dev);
+    FM_TRACE(0x5E);
+    FM_TRACE((uint8_t)(dev >> 8));
 
     m = newfstab();
+    FM_TRACE(0x5B);
     if (m == NULL) {
         udata.u_error = EMFILE;
+        FM_TRACE(0x53);
         return NULL;	/* Table is full */
     }
 
     fp = &m->m_fs;
 
     /* Get the buffer with the superblock (block 1) */
+    FM_TRACE(0x5C);
     buf = bread(dev, 1, 0);
-    if (buf == NULL)
+    FM_TRACE(0x5D);
+    if (buf == NULL) {
+        FM_TRACE(0x54);
+        FM_TRACE((uint8_t)udata.u_error);
         return NULL;
+    }
+    FM_TRACE(0x5F);
+    FM_TRACE(buf->__bf_data[0]);
+    FM_TRACE(buf->__bf_data[1]);
+    FM_TRACE(buf->__bf_data[2]);
+    FM_TRACE(buf->__bf_data[3]);
+    FM_TRACE(buf->__bf_data[4]);
+    FM_TRACE(buf->__bf_data[5]);
+    FM_TRACE(buf->__bf_data[6]);
+    FM_TRACE(buf->__bf_data[7]);
     blktok(fp, buf, 0, sizeof(struct filesys));
     brelse(buf);
+
+    FM_TRACE(0x6A);
+    FM_TRACE(((uint8_t *)fp)[0]);
+    FM_TRACE(((uint8_t *)fp)[1]);
+    FM_TRACE(((uint8_t *)fp)[2]);
+    FM_TRACE(((uint8_t *)fp)[3]);
+    FM_TRACE(((uint8_t *)fp)[4]);
+    FM_TRACE(((uint8_t *)fp)[5]);
+    FM_TRACE(((uint8_t *)fp)[6]);
+    FM_TRACE(((uint8_t *)fp)[7]);
+
+    FM_TRACE(0x57);
+    FM_TRACE((uint8_t)fp->s_mounted);
+    FM_TRACE((uint8_t)(fp->s_mounted >> 8));
+    FM_TRACE(0x58);
+    FM_TRACE((uint8_t)fp->s_isize);
+    FM_TRACE((uint8_t)(fp->s_isize >> 8));
+    FM_TRACE(0x59);
+    FM_TRACE((uint8_t)fp->s_fsize);
+    FM_TRACE((uint8_t)(fp->s_fsize >> 8));
+    FM_TRACE(0x5A);
+    FM_TRACE((uint8_t)fp->s_shift);
 
 #ifdef DEBUG
     kprintf("fp->s_mounted=0x%x, fp->s_isize=0x%x, fp->s_fsize=0x%x\n",
@@ -1253,6 +1310,7 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     if(fp->s_mounted != SMOUNTED  ||  fp->s_isize >= fp->s_fsize ||
         fp->s_shift > FS_MAX_SHIFT) {
         udata.u_error = EINVAL;
+        FM_TRACE(0x55);
         return NULL;
     }
 
@@ -1274,6 +1332,8 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
 
     /* Mark the filesystem dirty on disk */
     sync();
+
+    FM_TRACE(0x56);
 
     return m;
 }
@@ -1311,4 +1371,3 @@ arg_t unlinki(inoptr ino, inoptr pino, uint8_t *fname)
 	setftime(ino, C_TIME);
 	return (0);
 }
-

@@ -1,6 +1,14 @@
 #include "kernel.h"
 #include "printf.h"
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define B512_TRACE(x) plt_trace(x)
+static uint8_t b512_trace_count;
+#else
+#define B512_TRACE(x) do { } while (0)
+#endif
+
 #if (BLKSIZE == 512)
 
 /*
@@ -19,6 +27,25 @@ uint_fast8_t breadi(uint16_t dev, uint16_t ino, void *ptr)
     struct blkbuf *buf = bread(dev, (ino >> 3) + 2, 0);
     if (buf == NULL)
         return 1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    if (b512_trace_count < 4) {
+        uint16_t off = sizeof(struct dinode) * (ino & 7);
+        uint8_t *src = buf->__bf_data + off;
+        uint8_t *dst = (uint8_t *)ptr;
+        B512_TRACE(0xA0);
+        B512_TRACE((uint8_t)ino);
+        B512_TRACE((uint8_t)(ino >> 8));
+        B512_TRACE(src[0]); B512_TRACE(src[1]); B512_TRACE(src[2]); B512_TRACE(src[3]);
+        B512_TRACE(src[4]); B512_TRACE(src[5]); B512_TRACE(src[6]); B512_TRACE(src[7]);
+        blktok(ptr, buf, off, sizeof(struct dinode));
+        B512_TRACE(0xA1);
+        B512_TRACE(dst[0]); B512_TRACE(dst[1]); B512_TRACE(dst[2]); B512_TRACE(dst[3]);
+        B512_TRACE(dst[4]); B512_TRACE(dst[5]); B512_TRACE(dst[6]); B512_TRACE(dst[7]);
+        b512_trace_count++;
+        brelse(buf);
+        return 0;
+    }
+#endif
     blktok(ptr, buf, sizeof(struct dinode) * (ino & 7), sizeof(struct dinode));
     brelse(buf);
     return 0;

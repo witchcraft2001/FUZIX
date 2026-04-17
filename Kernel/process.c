@@ -12,6 +12,13 @@
 #include <audio.h>
 #include <timer.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void plt_trace(uint8_t code);
+#define PROC_TRACE(x) plt_trace(x)
+#else
+#define PROC_TRACE(x) do { } while (0)
+#endif
+
 /* psleep() puts a process to sleep on the given event.  If another
  * process is runnable, it switches out the current one and starts the
  * new one.  Normally when psleep is called, the interrupts have
@@ -547,9 +554,47 @@ void unix_syscall(void)
 {
 	arg_t rv;
 	udata.u_error = 0;
+	if (udata.u_ptab->p_pid == 1) {
+		PROC_TRACE(0xC2);
+		PROC_TRACE((uint8_t)udata.u_callno);
+		PROC_TRACE((uint8_t)udata.u_argn);
+		PROC_TRACE((uint8_t)(udata.u_argn >> 8));
+		PROC_TRACE((uint8_t)udata.u_syscall_sp);
+		PROC_TRACE((uint8_t)(udata.u_syscall_sp >> 8));
+	}
 
 	if (udata.u_callno >= FUZIX_SYSCALL_COUNT) {
-		udata.u_error = ENOSYS;
+#if defined(CONFIG_SPRINTER_EARLY_TRACE) && !defined(CONFIG_LEVEL_2)
+		if (udata.u_callno == 77) {
+			udata.u_retval = 0;
+			udata.u_error = 0;
+		} else if (udata.u_callno == 78) {
+			udata.u_ptab->p_pgrp = udata.u_ptab->p_pid;
+			udata.u_ptab->p_tty = 0;
+			udata.u_retval = udata.u_ptab->p_pid;
+			udata.u_error = 0;
+		} else if (udata.u_callno == 79) {
+			udata.u_retval = udata.u_ptab->p_pid;
+			udata.u_error = 0;
+		} else
+#endif
+		{
+			if (udata.u_ptab->p_pid == 1) {
+				PROC_TRACE(0xC4);
+				PROC_TRACE((uint8_t)udata.u_callno);
+				if (udata.u_callno & 0x80) {
+					PROC_TRACE(0xC7);
+					PROC_TRACE((uint8_t)udata.u_callno);
+					PROC_TRACE((uint8_t)udata.u_argn);
+					PROC_TRACE((uint8_t)(udata.u_argn >> 8));
+					PROC_TRACE((uint8_t)ugetc((void *)udata.u_syscall_sp));
+					PROC_TRACE((uint8_t)ugetc((void *)((uarg_t)udata.u_syscall_sp + 1)));
+					PROC_TRACE((uint8_t)ugetc((void *)((uarg_t)udata.u_syscall_sp + 2)));
+					PROC_TRACE((uint8_t)ugetc((void *)((uarg_t)udata.u_syscall_sp + 3)));
+				}
+			}
+			udata.u_error = ENOSYS;
+		}
 	} else {
 #ifdef DEBUG_SYSCALL
 		kprintf("\t\tpid %d: syscall %d\t%s(%p, %p, %p)\n",
@@ -571,6 +616,13 @@ void unix_syscall(void)
 			udata.u_ptab->p_pid, udata.u_callno,
 			udata.u_retval, udata.u_error);
 #endif
+	}
+	if (udata.u_ptab->p_pid == 1) {
+		PROC_TRACE(0xC3);
+		PROC_TRACE((uint8_t)udata.u_error);
+		PROC_TRACE((uint8_t)udata.u_retval);
+		PROC_TRACE((uint8_t)(udata.u_retval >> 8));
+		PROC_TRACE((uint8_t)udata.u_ptab->p_status);
 	}
 	udata.u_ptab->p_timeout = 0;
 
@@ -740,6 +792,9 @@ static uint_fast8_t chksigset(struct sigbits *sb, uint_fast8_t b)
 				udata.u_ptab->p_status = P_RUNNING;
 				nready++;
 			}
+			PROC_TRACE(0xCA);
+			PROC_TRACE((uint8_t)j);
+			PROC_TRACE((uint8_t)b);
 			doexit(dump_core(j));
 		} else if (*svec != SIG_IGN) {
 			/* Arrange to call the user routine at return */
@@ -914,6 +969,12 @@ void doexit(uint16_t val)
 	ptptr p;
 	irqflags_t irq;
 
+	PROC_TRACE(0xC6);
+	PROC_TRACE((uint8_t)udata.u_ptab->p_pid);
+	PROC_TRACE((uint8_t)udata.u_ptab->p_status);
+	PROC_TRACE((uint8_t)val);
+	PROC_TRACE((uint8_t)(val >> 8));
+
 #ifdef DEBUG_SLEEP
 	kprintf("process %d exiting %d\n", udata.u_ptab->p_pid, val);
 
@@ -922,7 +983,15 @@ void doexit(uint16_t val)
 	     udata.u_page, udata.u_ptab, udata.u_ptab->p_page);
 #endif
 	if (udata.u_ptab->p_pid == 1)
+	{
+		PROC_TRACE(0xC8);
+		PROC_TRACE((uint8_t)val);
+		PROC_TRACE((uint8_t)(val >> 8));
+		PROC_TRACE(0xC9);
+		PROC_TRACE((uint8_t)udata.u_error);
+		PROC_TRACE((uint8_t)udata.u_cursig);
 		panic(PANIC_KILLED_INIT);
+	}
 
 	sync();		/* Not necessary, but a good idea. */
 
@@ -1004,6 +1073,14 @@ void doexit(uint16_t val)
 
 void NORETURN panic(char *deathcry)
 {
+	PROC_TRACE(0xDB);
+	PROC_TRACE((uint8_t)(uarg_t)deathcry);
+	PROC_TRACE((uint8_t)(((uarg_t)deathcry) >> 8));
+	PROC_TRACE(0xDC);
+	PROC_TRACE(deathcry[0]);
+	PROC_TRACE(deathcry[1]);
+	PROC_TRACE(deathcry[2]);
+	PROC_TRACE(deathcry[3]);
 	kputs("\r\npanic: ");
 	kputs(deathcry);
 	plt_monitor();
@@ -1073,5 +1150,9 @@ void exec_or_die(void)
 	kputs("Starting /init\n");
 	plt_discard();
 	_execve();
+	PROC_TRACE(0xDA);
+	PROC_TRACE((uint8_t)udata.u_error);
+	PROC_TRACE((uint8_t)udata.u_retval);
+	PROC_TRACE((uint8_t)(udata.u_retval >> 8));
 	panic(PANIC_NOINIT);	/* BIG Trouble if we Get Here!! */
 }

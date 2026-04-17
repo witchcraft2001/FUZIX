@@ -7,6 +7,7 @@
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define EARLY_TRACE(x) plt_trace(x)
+extern void sprinter_force_bank1(void);
 #else
 #define EARLY_TRACE(x) do { } while (0)
 #endif
@@ -87,12 +88,14 @@ void add_argument(const char *s)
 void create_init(void)
 {
 	register uint8_t *j, *e;
+	EARLY_TRACE(0xC1);
 
 	udata.u_top = PROGLOAD + 512;	/* Plenty for the boot */
 	init_process = ptab_alloc();
 	udata.u_ptab = init_process;
 	init_process->p_top = udata.u_top;
 	map_init();
+	EARLY_TRACE(0xC2);
 
 	/* wipe file table */
 	e = udata.u_files + UFTSIZE;
@@ -100,6 +103,7 @@ void create_init(void)
 		*j = NO_FILE;
 
 	makeproc(init_process, &udata);
+	EARLY_TRACE(0xC3);
 
 	udata.u_insys = 1;
 	init_process->p_status = P_RUNNING;
@@ -111,7 +115,9 @@ void create_init(void)
 	progptr = PROGLOAD + 256;
 
 	uzero((void *)progptr, 32);
+	EARLY_TRACE(0xC4);
 	add_argument("/init");
+	EARLY_TRACE(0xC5);
 }
 
 void complete_init(void)
@@ -122,6 +128,13 @@ void complete_init(void)
 	udata.u_argn2 = (arg_t)argptr; /* Environment (none) */
 	udata.u_argn =  (arg_t)PROGLOAD + 256; /* "/init" */
 	udata.u_argn1 = (arg_t)PROGLOAD; /* Arguments */
+	EARLY_TRACE(0xE8);
+	EARLY_TRACE((uint8_t)udata.u_argn);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+	EARLY_TRACE((uint8_t)udata.u_argn1);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn1) >> 8));
+	EARLY_TRACE((uint8_t)udata.u_argn2);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn2) >> 8));
 
 #ifdef CONFIG_LEVEL_2
 	init_process->p_session = 1;
@@ -327,18 +340,12 @@ void set_boot_line(const char *p)
 
 #else
 
-static uint8_t first = 1;
-
 static inline uint16_t get_root_dev(void)
 {
 #ifdef BOOTPARAM
 	parse_args(BOOTPARAM);
 #endif
-	if (first) {
-		first = 0;
-		return BOOTDEVICE;
-	}
-	return BAD_ROOT_DEV;
+	return BOOTDEVICE;
 }
 #endif
 
@@ -358,12 +365,21 @@ void fuzix_main(void)
 	tty_init();
 	EARLY_TRACE(0x12);
 
+	EARLY_TRACE(0xD0);
+	sprinter_force_bank1();
+
 	EARLY_TRACE(0x13);
 	tty_open_rc = d_open(TTYDEV, 0);
 	EARLY_TRACE(0x14);
+	EARLY_TRACE(0xD1);
+	EARLY_TRACE((uint8_t)tty_open_rc);
+	EARLY_TRACE(0xD2);
+	EARLY_TRACE((uint8_t)udata.u_error);
 	if (tty_open_rc != 0) {
 		EARLY_TRACE(0xE1);
-		panic(PANIC_NOTTY);
+		tty_open_rc = 0;
+		udata.u_error = 0;
+		EARLY_TRACE(0xE2);
 	}
 
 	/* Sign on messages */
@@ -408,8 +424,8 @@ void fuzix_main(void)
 	create_init();
 	EARLY_TRACE(0x24);
 
-	/* Parameters message */
-	kprintf("%dKiB total RAM, %dKiB available to processes (%d processes max)\n", ramsize, procmem, maxproc);
+	/* Parameters message (temporarily suppressed during sprinter bring-up) */
+	EARLY_TRACE(0x25);
 
 	/* runtime configurable, defaults to build time setting */
 	ticks_per_dsecond = TICKSPERSEC / 10;
@@ -417,32 +433,55 @@ void fuzix_main(void)
 	/* There are some setups we delay the EI until after we've dumped the
 	   discard */
 #ifndef CONFIG_PLATFORM_LATE_EI
-	kputs("Enabling interrupts ... ");
-	__hard_ei();		/* Physical interrupts on */
+	/* Temporarily keep IRQs disabled during Sprinter bring-up. */
+	EARLY_TRACE(0x27);
 #endif
-	kputs("ok.\n");
+	EARLY_TRACE(0x26);
 
 	/* initialise hardware devices */
 	device_init();
 	EARLY_TRACE(0x30);
 
 	do {
+		static uint8_t mount_tries;
+		EARLY_TRACE(0x31);
             old_progptr = progptr;
             old_argptr = argptr;
             /* Get a root device to try */
-            root_dev = get_root_dev();
-            if (root_dev == BAD_ROOT_DEV)
-                panic(PANIC_NOROOT);
+	            root_dev = (uint8_t)get_root_dev();
+            EARLY_TRACE(0x32);
+            EARLY_TRACE((uint8_t)root_dev);
+		EARLY_TRACE(0x3E);
+		EARLY_TRACE((uint8_t)(root_dev >> 8));
+            if (root_dev == BAD_ROOT_DEV) {
+			EARLY_TRACE(0x33);
+			root_dev = 1;
+			EARLY_TRACE(0x3B);
+            }
             /* Mount the root device */
-            kprintf("Mounting root fs (root_dev=%d, r%c): ", root_dev, ro ? 'o' : 'w');
+		EARLY_TRACE(0x34);
+		/* Console output disabled while early tty bring-up is unstable. */
             m = fmount(root_dev, NULLINODE, ro);
+		EARLY_TRACE(0x35);
             if (m == NULL) {
-	            kputs("failed\n");
+			EARLY_TRACE(0x36);
+			EARLY_TRACE(0x3C);
+			EARLY_TRACE((uint8_t)udata.u_error);
+			EARLY_TRACE(0x3F);
+			EARLY_TRACE(mount_tries);
+			mount_tries++;
+			EARLY_TRACE(0x3A);
+			EARLY_TRACE(mount_tries);
+			if (mount_tries >= 1) {
+				EARLY_TRACE(0x3D);
+				panic(PANIC_NOROOT);
+			}
 		    /* reset potentially altered state before prompting the user for command line again */
 	            progptr = old_progptr;
 		    argptr = old_argptr;
 	            ro = MS_RDONLY;
-	    }
+	    } else
+			EARLY_TRACE(0x37);
         } while(m == NULL);
 
         /* Set the system time from the superblock. In turn user space will
@@ -451,14 +490,25 @@ void fuzix_main(void)
         tod.low = m->m_fs.s_time;
         tod.high = m->m_fs.s_timeh;
 
+	EARLY_TRACE(0x38);
 	root = i_open(root_dev, ROOTINODE);
-	if (!root)
+	if (!root) {
+		EARLY_TRACE(0x39);
 		panic(PANIC_NOROOT);
+	}
+	EARLY_TRACE(0x3A);
 
 	kputs("OK\n");
 
 	/* finish building argv */
 	complete_init();
+	EARLY_TRACE(0xE9);
+	EARLY_TRACE((uint8_t)udata.u_argn);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+	EARLY_TRACE((uint8_t)udata.u_argn1);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn1) >> 8));
+	EARLY_TRACE((uint8_t)udata.u_argn2);
+	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn2) >> 8));
 
 	udata.u_cwd = i_ref(root);
 	udata.u_root = i_ref(root);
