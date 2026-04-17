@@ -123,6 +123,27 @@ uputget:
 	ret
 
 ;
+;	_uput() wrapper uses a different stack argument order than _uget().
+;	On entry to __uput (after push ix):
+;	 6(ix)  source
+;	 8(ix)  count
+;	10(ix)  destination (user)
+;
+uputget_put:
+	; load BC with the byte count
+	ld c, 8(ix)
+	ld b, 9(ix)
+	; load HL with source address
+	ld l, 6(ix)
+	ld h, 7(ix)
+	; load DE with destination user address
+	ld e, 10(ix)
+	ld d, 11(ix)
+	ld a, b
+	or c
+	ret
+
+;
 ;	Make the user pages holding DE upwards appear at 0x4000-0xBFFF
 ;	Return an updated DE with the mapped address.
 ;
@@ -137,10 +158,24 @@ user_map_de:
 	ld hl, #_udata + U_DATA__U_PAGE
 	add hl, de
 	ld a, (hl)
+	cp #0x08
+	jr c, user_map_de_b1_bad
+	cp #0x80
+	jr c, user_map_de_b1_ok
+user_map_de_b1_bad:
+	ld a, #0x49
+user_map_de_b1_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a
 	inc hl
 	ld a, (hl)
+	cp #0x08
+	jr c, user_map_de_b2_bad
+	cp #0x80
+	jr c, user_map_de_b2_ok
+user_map_de_b2_bad:
+	ld a, #0x4A
+user_map_de_b2_ok:
 	ld (mpgsel_cache + 2), a
 	out (MPGSEL_2), a
 	exx
@@ -158,9 +193,13 @@ __uput:
 	push ix
 	ld ix, #0
 	add ix, sp
-	call uputget
+	call uputget_put
+	ld a, h
+	cp #0xC0
+	jr c, uput_slow
+	call map_proc_save_u
 uput_next:
-	jr z, uput_out
+	jr z, uput_fast_out
 
 	ld a, b
 	and #0xC0
@@ -169,6 +208,7 @@ uput_next:
 	call user_map_de
 copy_and_out:
 	ldir
+	uput_fast_out:
 	call map_kernel_restore_u
 uput_out:
 	pop ix
@@ -192,6 +232,34 @@ uput_large:
 	or c
 	jr uput_next
 
+uput_slow:
+	ld a, b
+	or c
+	jr z, uput_out
+uput_slow_loop:
+	ld a, b
+	or c
+	jr z, uput_out
+	ld a, (hl)
+	inc hl
+	push hl
+	push bc
+	push de
+	push af
+	call map_proc_save_u
+	pop af
+	call user_map_de
+	ld h, d
+	ld l, e
+	ld (hl), a
+	pop de
+	call map_kernel_restore_u
+	inc de
+	pop bc
+	pop hl
+	dec bc
+	jr uput_slow_loop
+
 ;
 ;	Copy data from user space
 ;
@@ -199,6 +267,7 @@ __uget:
 	push ix
 	ld ix, #0
 	add ix, sp
+	call map_proc_save_u
 	call uputget
 uget_next:
 	jr z, uput_out

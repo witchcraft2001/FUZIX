@@ -33,7 +33,9 @@ uint_fast8_t ide_read(uint_fast8_t regaddr) __naked
 {
 	regaddr;
 	__asm
-		ld hl, #2
+		; SDCC banked calls add a hidden 2-byte noopt push before call,
+		; so first user argument is at SP+4 on entry.
+		ld hl, #4
 		add hl, sp
 		ld a, (hl)		; regaddr
 
@@ -74,10 +76,10 @@ void ide_write(uint_fast8_t regaddr, uint_fast8_t val) __naked
 {
 	regaddr; val;
 	__asm
-		ld hl, #2
+		; SDCC banked call frame: args start at SP+4.
+		ld hl, #4
 		add hl, sp
 		ld e, (hl)		; regaddr
-		inc hl
 		inc hl
 		ld a, (hl)		; val
 
@@ -117,17 +119,24 @@ void devide_read_data(uint8_t *dptr) __naked
 {
 	dptr;
 	__asm
-		ld hl, #2
+		; SDCC banked call frame: args start at SP+4.
+		ld hl, #4
 		add hl, sp
 		ld e, (hl)
 		inc hl
 		ld d, (hl)
 		ex de, hl		; HL = destination address
 
-		ld bc, #0x0050		; B=0 (256 iterations), C=data port
-		inir			; read 256 bytes
-		ld b, #0		; reset counter
-		inir			; read another 256 bytes
+		ld bc, #0x0050		; fixed IDE data port
+		ld de, #0x0200		; 512 bytes
+1$:
+		in a, (c)
+		ld (hl), a
+		inc hl
+		dec de
+		ld a, d
+		or e
+		jr nz, 1$
 		ret
 	__endasm;
 }
@@ -139,17 +148,24 @@ void devide_write_data(uint8_t *dptr) __naked
 {
 	dptr;
 	__asm
-		ld hl, #2
+		; SDCC banked call frame: args start at SP+4.
+		ld hl, #4
 		add hl, sp
 		ld e, (hl)
 		inc hl
 		ld d, (hl)
 		ex de, hl		; HL = source address
 
-		ld bc, #0x0050		; B=0 (256 iterations), C=data port
-		otir			; write 256 bytes
-		ld b, #0
-		otir			; write another 256 bytes
+		ld bc, #0x0050		; fixed IDE data port
+		ld de, #0x0200		; 512 bytes
+1$:
+		ld a, (hl)
+		out (c), a
+		inc hl
+		dec de
+		ld a, d
+		or e
+		jr nz, 1$
 		ret
 	__endasm;
 }

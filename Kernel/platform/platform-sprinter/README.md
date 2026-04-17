@@ -155,3 +155,75 @@ dd if=Images/sprinter/fuzix.img of=/dev/sdX bs=512 conv=fsync
 | Filesystem image | ✅ Built by `make diskimage` |
 | Emulator test (MAME) | 🔲 Not yet tested |
 | FDD (WD1793) | 🔲 Not implemented |
+
+## Bring-Up Recovery Point (2026-04-17)
+
+This section tracks the current stabilization point for `/init` bring-up on Sprinter,
+so a new session can continue from the same state.
+
+### Goal
+
+- Boot reaches mounted root FS and runs `/init` reliably.
+- Avoid memory-corrupting recovery hacks.
+- Eliminate `panic: killed init` by fixing the real cause of PID1 `_exit(-1)`.
+
+### Current Safe State
+
+- System is in deterministic panic mode again (no disk image corruption, no full-trace `0xFF` flood).
+- Main reproducible failure currently ends in `plt_monitor` (`PC=0xEE65`) with panic text `no /init`.
+- Current `_execve` bring-up instrumentation shows `u_argn == 0` at entry (`E8 00 00`), but fallback write path (`EC`) still does not execute in failing runs.
+
+### Last Known-Useful Fixes Kept
+
+- `Kernel/platform/platform-sprinter/usermem.s`: `__uput`/slow-path fixes (required for valid `/init` string path writes).
+- `Kernel/cpu-z80/lowlevel-z80-banked.s`: `null_handler` now sets syscall number in `A` before `unix_syscall_entry` calls:
+  - `A=39` for `signal(getpid(), SIGBUS)`
+  - `A=0` for `_exit`
+
+### Recovery Hooks Disabled Again
+
+- Automatic PID1 restart from `doexit()` removed.
+- Automatic `exec_or_die()` on bogus syscall (`u_callno & 0x80`) removed.
+- Forced marker-based restart path in `_execve()` removed.
+
+These hooks were useful for diagnosis but caused unstable behavior in some runs.
+
+### Latest Trace Signature (authoritative)
+
+Current observed signatures (latest runs):
+
+- `... C2 4F 01 00 ... C3 00 01 00 08 ...`
+  - PID1 syscall `0x4F` (`getsid`) returns success.
+- **Signature A (`PANIC_NOINIT`)**
+  - `... F1 D2 08 D1 08 D0 08 ... DB F2 F2 DC 6E 6F 20 2F ...`
+  - `_execve` enters with null/garbage exec name (`E7 00 00`, `EB 00 00`, `EF 00...`) and panics `no /init`.
+- **Signature A2 (`PANIC_NOINIT` with fallback diagnostics)**
+  - `... E8 00 00 01 ... E7 00 00 EA 00 00 EB 00 00 EF 00...`
+  - PID1 (`01`) enters `_execve` with null exec pointer, but expected fallback marker `EC` is absent before panic.
+- **Signature B (`PANIC_WANTBSYB`)**
+  - `... DB C7 C7 DC 77 61 6E 74 ...`
+  - panic string starts with `want` (`PANIC_WANTBSYB`, "want busy block").
+- **Signature C (guard hit + unstable flow)**
+  - `... E6 ... EB 40 40 EF 2F 69 6E 69 74 00 ...`
+  - PID1 exec-name guard rewrites to `/init`, then run may still jump to low-memory garbage (`PC ~ 0x004F`).
+
+Latest snapshot details (2026-04-17, cycles 297/217):
+
+- `PC=0xEE65`, `SP=0xFBE8`, `PG0=0x0148`, `PG1=0x014C`, `PG2=0x01FE`, `PG3=0x014B`
+- Trace around failure:
+  - `... E8 00 00 01 E0 E7 00 00 EA 00 00 EB 00 00 EF 00 00 00 00 00 00 ...`
+  - `... F1 D2 08 D1 08 D0 08 DA 08 ... DB F2 F2 DC 6E 6F 20 2F ...`
+
+### Next Debug Target
+
+- Explain why `_execve` fallback path is skipped despite `u_argn==0` (`E8 00 00`) and PID1 (`01`).
+- Keep changes minimal and deterministic (no aggressive restart guards).
+- Once `EC`/valid `exec_name` path is stable, continue toward previous target: reproduce and fix `killed init` (`_exit(-1)` from PID1).
+
+### Rebuild Command
+
+```sh
+make diskimage TARGET=sprinter
+```
+
+Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.

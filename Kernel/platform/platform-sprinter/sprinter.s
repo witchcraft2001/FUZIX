@@ -29,11 +29,14 @@
 	.globl _plt_reboot
 	.globl _plt_monitor
 	.globl _plt_trace
+	.globl _sprinter_force_bank1
+	.globl _dev_tab
 	.globl _int_disabled
 	.globl _sprinter_trace_last
 	.globl _sprinter_trace_idx
 	.globl _sprinter_trace_buf
 	.globl _sprinter_dbg
+	.globl _td_op
 
         ; imported symbols
         .globl _ramsize
@@ -79,6 +82,51 @@ init_hardware:
 	ld a, #0x03		; text 80x32 mode via port #C3
 	out (VID_MODE), a
 
+	; Leave RGMOD (port #C9) untouched: BIOS has already fully
+	; initialised the currently displayed screen (including Mode0
+	; bytes, font, geometry).  Switching the RGMOD page bit would
+	; point the video controller at a different VRAM area whose
+	; Mode0 cells are uninitialised garbage (most notably rendering
+	; as BORDER because MODE0[7:4]==#F on un-programmed cells).
+	; Instead we write to whichever screen BIOS left active, using
+	; the PORT_Y bit 7 marker in sprvideo.s to target it.
+
+	; Clear the displayed screen so kernel output starts on a clean
+	; background rather than mixed with BIOS boot-loader text.
+	; Directly write space + default attr to every cell (screen B
+	; layout: PORT_Y = (col+1) | 0x80, HL = 0x8301 + row*4).  WIN2
+	; is temporarily remapped to VRAM page #50 for the fill.
+	ld a, #0x50
+	out (MPGSEL_2), a
+	ld e, #0			; row = 0
+clsrow:
+	ld d, #0			; col = 0
+clscol:
+	ld a, d
+	inc a
+	or #0x80			; screen B
+	out (VID_PAGE), a
+	ld a, e
+	rlca
+	rlca				; row * 4
+	ld l, a
+	ld h, #0x83			; HL = 0x8300 + row*4 (Mode0)
+	inc l				; HL = 0x8301 + row*4 (Mode1)
+	ld (hl), #0x20			; space
+	inc hl
+	ld (hl), #0x0F			; white on black
+	inc d
+	ld a, d
+	cp #80
+	jr nz, clscol
+	inc e
+	ld a, e
+	cp #32
+	jr nz, clsrow
+	; Restore WIN2 to kernel bank1 high page.
+	ld a, #0x4A
+	out (MPGSEL_2), a
+
 	; Set up CTC for 50Hz timer interrupt
 	; CTC channel 2 + 3 chained for timer
 	ld a, #0x57		; timer mode, prescaler=256, INT enable
@@ -114,9 +162,65 @@ init_hardware:
 
 _plt_monitor:
 _plt_reboot:
+	; Call _plt_trace using SDCC's sdcccall(0) stack convention
+	; (arg at SP+4 on callee entry): push the byte, inc sp to strip
+	; the F padding, then push A for noopt-preserve, then call.
 	ld a, #0xFE
+	push af
+	inc sp
+	push af
 	call _plt_trace
+	pop af
+	inc sp
 	di
+	; Capture caller return address from stack (who entered reboot/monitor).
+	ld hl, #0
+	add hl, sp
+	ld a, (hl)
+	ld (_sprinter_dbg + 24), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 25), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 26), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 27), a
+	ld hl, #0x0155
+	ld de, #_sprinter_dbg
+	ld bc, #0x000E
+	ldir
+	ld hl, #_dev_tab + 0x0014
+	ld a, (hl)
+	ld (_sprinter_dbg + 14), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 15), a
+	ld hl, #_dev_tab
+	ld a, (hl)
+	ld (_sprinter_dbg + 16), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 17), a
+	ld hl, #_dev_tab + 0x0004
+	ld a, (hl)
+	ld (_sprinter_dbg + 18), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 19), a
+	ld hl, #_dev_tab + 0x0008
+	ld a, (hl)
+	ld (_sprinter_dbg + 20), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 21), a
+	ld hl, #_td_op
+	ld a, (hl)
+	ld (_sprinter_dbg + 22), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 23), a
 plt_monitor_hang:
 	halt
 	jr plt_monitor_hang
@@ -248,7 +352,7 @@ map_proc_save:
 map_proc_always_di:
 	push hl
 	ld hl, #_udata + U_DATA__U_PAGE
-        jr map_proc_2_pophl_ret
+	jp map_proc_2_pophl_ret
 
 ;=========================================================================
 ; map_proc - map process or kernel pages
@@ -273,7 +377,17 @@ map_kernel_di:
 	push hl
 	call sanitize_kpages
 	ld hl, #_kernel_pages
-        jr map_proc_2_pophl_ret
+	jp map_proc_2_pophl_ret
+
+_sprinter_force_bank1:
+	ld bc, #MAP_BANK1
+	ld (_kernel_pages + 1), bc
+	ld (mpgsel_cache + 1), bc
+	ld a, c
+	out (MPGSEL_1), a
+	ld a, b
+	out (MPGSEL_2), a
+	ret
 
 ;=========================================================================
 ; map_proc_2 - map process or kernel pages
@@ -283,25 +397,46 @@ map_kernel_di:
 map_proc_2:
 	push de
 	push af
-	ld de, #mpgsel_cache		; cache for paging registers
 	ld a, (hl)			; page for bank #0
-	ld (de), a
+	cp #0x08
+	jr c, map_proc_2_b0_bad
+	cp #0x80
+	jr c, map_proc_2_b0_ok
+map_proc_2_b0_bad:
+	ld a, #0x48
+map_proc_2_b0_ok:
+	ld (mpgsel_cache), a
 	out (MPGSEL_0), a		; set bank #0
 	inc hl
-	inc de
 	ld a, (hl)			; page for bank #1
-	ld (de), a
+	cp #0x08
+	jr c, map_proc_2_b1_bad
+	cp #0x80
+	jr c, map_proc_2_b1_ok
+map_proc_2_b1_bad:
+	ld a, #0x49
+map_proc_2_b1_ok:
+	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a		; set bank #1
 	inc hl
-	inc de
 	ld a, (hl)			; page for bank #2
-	ld (de), a
+	cp #0x08
+	jr c, map_proc_2_b2_bad
+	cp #0x80
+	jr c, map_proc_2_b2_ok
+map_proc_2_b2_bad:
+	ld a, #0x4A
+map_proc_2_b2_ok:
+	ld (mpgsel_cache + 2), a
 	out (MPGSEL_2), a		; set bank #2
 	pop af
 	pop de
 	ret
 
 sanitize_kpages:
+	ld a, (_kernel_pages)
+	cp #0x48
+	jr nz, sanitize_kpages_bad
 	ld a, (_kernel_pages + 1)
 	cp #0x08
 	jr c, sanitize_kpages_bad
@@ -312,11 +447,25 @@ sanitize_kpages:
 	jr c, sanitize_kpages_bad
 	cp #0x80
 	jr nc, sanitize_kpages_bad
+	ld a, (_kernel_pages + 3)
+	cp #0x4B
+	jr nz, sanitize_kpages_bad
 	ret
 sanitize_kpages_bad:
-	ld hl, #MAP_BANK1
-	ld (_kernel_pages + 1), hl
-	ld (mpgsel_cache + 1), hl
+	ld a, #0x48
+	ld (_kernel_pages), a
+	ld (mpgsel_cache), a
+	ld a, #0x49
+	ld (_kernel_pages + 1), a
+	ld (mpgsel_cache + 1), a
+	ld a, #0x4A
+	ld (_kernel_pages + 2), a
+	ld (mpgsel_cache + 2), a
+	ld a, #0x4B
+	ld (_kernel_pages + 3), a
+	ld (mpgsel_cache + 3), a
+	ld (top_bank), a
+	out (MPGSEL_3), a
 	ret
 
 ;=========================================================================
@@ -365,6 +514,13 @@ map_kernel_restore_u:
 ; Outputs: none
 ;=========================================================================
 map_for_swap:
+	cp #0x08
+	jr c, map_for_swap_bad
+	cp #0x80
+	jr c, map_for_swap_ok
+map_for_swap_bad:
+	ld a, #0x49
+map_for_swap_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a
 	ret
@@ -414,9 +570,21 @@ outchar:
         ret
 
 _plt_trace:
+	; void plt_trace(uint8_t code)
+	;
+	; SDCC default sdcccall(0) pushes the uint8_t argument on the stack
+	; via `push af` + `inc sp`.  After the caller's `push af;noopt`
+	; (preserves A around the call), the 1-byte argument sits at SP+4
+	; on entry.  The A register at entry is NOT guaranteed to hold the
+	; argument -- SDCC often computes the byte into B/C/E/L and pushes
+	; directly, leaving A with a stale value from the previous trace.
+	; Reading A here gave bogus trace entries for any non-literal arg.
+	ld hl, #4
+	add hl, sp
+	ld a, (hl)			; A = argument byte from stack
 	ld e, a
 	ld a, (_sprinter_trace_idx)
-	and #0x1F
+	and #0xFF
 	ld c, a
 	inc a
 	ld (_sprinter_trace_idx), a
@@ -426,7 +594,6 @@ _plt_trace:
 	ld a, e
 	ld (hl), a
 	ld (_sprinter_trace_last), a
-	out (VID_BORDER), a
 	ret
 
 _tmpout:
@@ -674,10 +841,10 @@ _sprinter_trace_idx:
 	.db 0
 
 _sprinter_trace_buf:
-	.ds 32
+	.ds 256
 
 _sprinter_dbg:
-	.ds 16
+	.ds 32
 
 pv_oldsp:
 	.dw 0

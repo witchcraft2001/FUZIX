@@ -30,6 +30,7 @@
         .globl _do_beep
         .globl _vtattr_notify
         .globl _vtattr_cap
+        .globl mpgsel_cache
 
         .include "kernel.def"
 
@@ -51,52 +52,95 @@ VRAM_TEXT	.equ	0x50
 ;----------------------------------------------------------------------
 ; map_vr: save current WIN2 page, map VRAM page #50 into WIN2
 ; Destroys: A
+;
+; NOTE: the saved page MUST live in a static variable -- using `push af`
+; here would put the saved byte on top of the caller's return address,
+; and `ret` would then jump to the saved value instead of returning to
+; the caller.  sprvideo is not expected to be called recursively or
+; reentrantly while VRAM is mapped, so a single scalar is enough.
 ;----------------------------------------------------------------------
 map_vr:
-        in a, (MPGSEL_2)
-        push af
+        ; MPGSEL ports are not reliably readable on Sprinter.
+        ; Use software cache maintained by map layer.
+        ld a, (mpgsel_cache + 2)
+        ld (saved_vr_page), a
         ld a, #VRAM_TEXT
         out (MPGSEL_2), a
+        ld (mpgsel_cache + 2), a
         ret
 
 ;----------------------------------------------------------------------
 ; unmap_vr: restore WIN2 page saved by map_vr
-; Destroys: A (flags)
+; Destroys: A
 ;----------------------------------------------------------------------
 unmap_vr:
-        pop af
+        ld a, (saved_vr_page)
         out (MPGSEL_2), a
+        ld (mpgsel_cache + 2), a
         ret
 
 ;----------------------------------------------------------------------
 ; cell_hl: set RGADR and compute char address for cell (D=col, E=row)
 ; On entry:  D = col (0..79), E = row (0..31)
-; On exit:   HL = 0x8300 + row*4  (char byte address in WIN2)
-;            RGADR (VID_PAGE) set to col+1
+; On exit:   HL = 0x8301 + row*4  (Mode1 / char byte in WIN2)
+;            RGADR (VID_PAGE) set to (col+1) | 0x80 -- screen B selector
 ; Destroys:  A
 ; WIN2 must already be mapped to VRAM page #50 (via map_vr)
+;
+; Sprinter text mode has two independent VRAM screens:
+;   Screen A: PORT_Y = col + 1         (pages #50-#54)
+;   Screen B: PORT_Y = (col + 1) | #80 (pages #55-#59)
+;
+; BIOS initialises the Mode0 display-mode bytes only for whichever
+; screen it is currently using (RGMOD bit 0).  On observed boot state
+; RGMOD = 1 -> screen B is live, and screen A's Mode0 bytes are still
+; un-programmed, so they render as BORDER and any writes to screen A
+; are invisible.  We therefore target screen B (bit 7 in PORT_Y) and
+; let BIOS' cell initialisation stand.
+;
+; VRAM cell layout (from manual 05_graphics/08_text_mode.md):
+;   LA + 0  Mode0  display-mode byte, set by BIOS -- DO NOT OVERWRITE
+;   LA + 1  Mode1  character code
+;   LA + 2  Mode2  attribute (INK/PAPER)
+;   LA + 3  Mode3  reserved
+; where LA = 0x8300 + row*4 when WIN2 holds VRAM page 0x50.
 ;----------------------------------------------------------------------
 cell_hl:
         ld a, d
         inc a
-        out (VID_PAGE), a	; RGADR = col + 1
+        or #0x80		; screen B select (bit 7)
+        out (VID_PAGE), a	; RGADR = (col + 1) | 0x80
         ld a, e
         rlca
         rlca			; A = row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + row*4
+        ld h, #0x83		; HL = 0x8300 + row*4  (Mode0 base)
+        inc l			; HL = 0x8301 + row*4  (Mode1, char byte)
         ret
 
 ;----------------------------------------------------------------------
 ; _plot_char(int8_t y, int8_t x, uint16_t c)
+;
+; Caller layout (SDCC sdcccall(0) with `push af;noopt` optimisation):
+;   SP+0..1 = return address
+;   SP+2..3 = noopt AF frame (pushed by the `push af;noopt` before call)
+;   SP+4    = y (int8_t)
+;   SP+5    = x (int8_t)
+;   SP+6..7 = c (uint16_t, char code in low byte)
+;
+; We follow the zx128/zxuno convention: pop the two extra frames (ret +
+; noopt) into IY/HL, pop args into DE/BC, then restore symmetrically so
+; a trailing `jp unmap_vr` / `ret` returns to the original caller.
 ;----------------------------------------------------------------------
 _plot_char:
-        pop hl
+        pop iy			; return address
+        pop hl			; noopt AF placeholder
         pop de			; D = x (col), E = y (row)
         pop bc			; C = character code
         push bc
         push de
         push hl
+        push iy
 
         call map_vr
         call cell_hl
@@ -112,12 +156,14 @@ _plot_char:
 ; count is expected to fit in C (max 80).
 ;----------------------------------------------------------------------
 _clear_across:
-        pop hl
+        pop iy			; return address
+        pop hl			; noopt AF placeholder
         pop de			; D = x (col), E = y (row)
         pop bc			; C = count
         push bc
         push de
         push hl
+        push iy
 
         call map_vr
         ld b, e			; B = row (constant for this call)
@@ -127,14 +173,16 @@ ca_loop:
         jr z, ca_done
         ld a, d
         inc a
-        out (VID_PAGE), a	; RGADR = col + 1
+        or #0x80		; screen B selector (bit 7)
+        out (VID_PAGE), a	; RGADR = (col + 1) | 0x80
         ld a, b			; row
         rlca
         rlca			; A = row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + row*4
+        ld h, #0x83		; HL = 0x8300 + row*4  (Mode0)
+        inc l			; HL = 0x8301 + row*4  (Mode1, char)
         ld (hl), #0x20		; space
-        inc hl
+        inc hl			; -> Mode2 (attr)
         ld (hl), #DATTR		; attribute
         inc d			; next col
         dec c
@@ -148,10 +196,12 @@ ca_done:
 ; Clears 'count' full rows starting at row y.
 ;----------------------------------------------------------------------
 _clear_lines:
-        pop hl
+        pop iy			; return address
+        pop hl			; noopt AF placeholder
         pop de			; D = count, E = start row
         push de
         push hl
+        push iy
 
 cl_loop:
         ld a, d
@@ -160,11 +210,14 @@ cl_loop:
         push de			; save (D=remaining count, E=current row)
         ld d, #0		; x = 0
         ld bc, #80		; count = 80
-        push bc			; push count
-        push de			; push (D=0=x, E=row=y)
+        push bc			; count word
+        push de			; (D=0=x, E=row=y)
+        push af			; noopt AF placeholder so callee sees the
+				; same frame layout as an SDCC-generated call
         call _clear_across
-        pop bc			; cleanup
-        pop de			; cleanup
+        pop af			; noopt cleanup
+        pop de			; args cleanup
+        pop bc
         pop de			; restore (D=remaining, E=row)
         inc e			; next row
         dec d			; decrement count
@@ -185,9 +238,10 @@ su_row:
         push de
         ld d, #0		; col = 0
 su_col:
-        ; Set RGADR for current col (same for src and dst)
+        ; Set RGADR for current col (same for src and dst); screen B
         ld a, d
         inc a
+        or #0x80
         out (VID_PAGE), a
 
         ; Read char + attr from src row (e+1)
@@ -197,9 +251,10 @@ su_col:
         rlca
         rlca			; A = src_row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + src_row*4
+        ld h, #0x83		; HL = 0x8300 + src_row*4 (Mode0)
+        inc l			; HL = 0x8301 + src_row*4 (Mode1, char)
         ld a, (hl)		; char
-        inc hl
+        inc hl			; -> Mode2 (attr)
         ld c, (hl)		; attr -> C
         pop de			; restore (D=col, E=dst_row)
 
@@ -210,10 +265,11 @@ su_col:
         rlca
         rlca			; A = dst_row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + dst_row*4
+        ld h, #0x83		; HL = 0x8300 + dst_row*4 (Mode0)
+        inc l			; HL = 0x8301 + dst_row*4 (Mode1, char)
         pop af			; restore char
         ld (hl), a		; write char
-        inc hl
+        inc hl			; -> Mode2 (attr)
         pop bc			; restore attr
         ld (hl), c		; write attr
 
@@ -235,9 +291,11 @@ su_col:
         ld bc, #80
         push bc
         push de
+        push af			; noopt AF placeholder
         call _clear_across
-        pop bc
+        pop af
         pop de
+        pop bc
         ret
 
 ;----------------------------------------------------------------------
@@ -255,9 +313,10 @@ sd_row:
         push de
         ld d, #0
 sd_col:
-        ; Set RGADR for current col
+        ; Set RGADR for current col; screen B selector
         ld a, d
         inc a
+        or #0x80
         out (VID_PAGE), a
 
         ; Read char + attr from src row (e-1)
@@ -267,9 +326,10 @@ sd_col:
         rlca
         rlca			; A = src_row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + src_row*4
+        ld h, #0x83		; HL = 0x8300 + src_row*4 (Mode0)
+        inc l			; HL = 0x8301 + src_row*4 (Mode1, char)
         ld a, (hl)		; char
-        inc hl
+        inc hl			; -> Mode2 (attr)
         ld c, (hl)		; attr -> C
         pop de			; restore (D=col, E=dst_row)
 
@@ -280,10 +340,11 @@ sd_col:
         rlca
         rlca			; A = dst_row * 4
         ld l, a
-        ld h, #0x83		; HL = 0x8300 + dst_row*4
+        ld h, #0x83		; HL = 0x8300 + dst_row*4 (Mode0)
+        inc l			; HL = 0x8301 + dst_row*4 (Mode1, char)
         pop af
         ld (hl), a		; write char
-        inc hl
+        inc hl			; -> Mode2 (attr)
         pop bc
         ld (hl), c		; write attr
 
@@ -305,9 +366,11 @@ sd_col:
         ld bc, #80
         push bc
         push de
+        push af			; noopt AF placeholder
         call _clear_across
-        pop bc
+        pop af
         pop de
+        pop bc
         ret
 
 ;----------------------------------------------------------------------
@@ -316,10 +379,12 @@ sd_col:
 ; Saves cursor position and inverts the attribute at (x, y).
 ;----------------------------------------------------------------------
 _cursor_on:
-        pop hl
+        pop iy			; return address
+        pop hl			; noopt AF placeholder
         pop de			; D = x (col), E = y (row)
         push de
         push hl
+        push iy
         ; Save cursor position (H=x, L=y -> stored as 16-bit HL)
         ld h, d
         ld l, e
@@ -377,3 +442,5 @@ beep_loop:
         .area _DATA
 cursorpos:
         .dw 0
+saved_vr_page:
+        .db 0
