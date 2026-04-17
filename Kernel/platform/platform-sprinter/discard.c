@@ -73,4 +73,24 @@ void pagemap_init(void)
 
 void map_init(void)
 {
+	/*
+	 * Allocate the first batch of user pages for PID1 (init) BEFORE
+	 * start.c::create_init() runs add_argument("/init") which calls
+	 * uputc into the init process's user space at PROGLOAD+256.
+	 *
+	 * Without this, init_process->p_page is zero, makeproc copies that
+	 * zero into udata.u_page, and map_proc_2 sanitises the zero by
+	 * substituting kernel page 0x48 for WIN0 -- so the "/init" string
+	 * ends up written inside the kernel code bank instead of user RAM.
+	 * Later _execve reads the corrupted bytes via ugetc, fails to
+	 * resolve the path and panics with PANIC_NOINIT.
+	 *
+	 * pagemap_alloc uses init_process->p_top (set to PROGLOAD+512 by
+	 * create_init) to compute how many 16 KB pages the process needs
+	 * and fills p_page from the free pool (populated by pagemap_init
+	 * above).  After this map_proc_2 will map real user pages into
+	 * WIN0..WIN2 and early writes land in actual user RAM.
+	 */
+	if (init_process && pagemap_alloc(init_process) != 0)
+		panic("map_init: no pages");
 }

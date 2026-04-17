@@ -127,12 +127,17 @@ clscol:
 	ld a, #0x4A
 	out (MPGSEL_2), a
 
-	; Set up CTC for 50Hz timer interrupt
-	; CTC channel 2 + 3 chained for timer
-	ld a, #0x57		; timer mode, prescaler=256, INT enable
+	; Hard-disable every Z84C15 on-chip CTC channel.  BIOS may have
+	; left CTC CH0..CH3 generating periodic IM2 vectors.  The kernel
+	; interrupt_handler exit path unconditionally clears _int_disabled
+	; and `ei`s, so a single pre-enabled CTC interrupt latches the CPU
+	; into a loop we can't exit.  Issue reset+no-trigger for every
+	; channel so none can raise TINT until the kernel is stable.
+	ld a, #0x03		; SW reset | CW
+	out (CTC_CH0), a
+	out (CTC_CH1), a
 	out (CTC_CH2), a
-	ld a, #112		; time constant for ~50Hz
-	out (CTC_CH2), a
+	out (CTC_CH3), a
 
 	; Set up IM2 interrupt vectors
 	; Fill 257-byte table at 0xFE00 with 0xFD
@@ -143,15 +148,26 @@ clscol:
 	ld (hl), #0xFD
 	ldir
 
-	; Set up jump at 0xFDFD to our interrupt handler
-	ld a, #0xC3		; JP instruction
+	; Install a MINIMAL bring-up IRQ stub at 0xFDFD instead of the
+	; FUZIX `interrupt_handler`.  The FUZIX handler's exit path
+	; unconditionally clears _int_disabled and `ei`s, which latches
+	; the kernel in an interrupt loop as soon as any IM2 vector
+	; fires (CTC, SIO, ULA FRAME / VSync, ISA slot, etc).  Our stub
+	; just does `reti` with IFF1 left at 0 so interrupts stay off.
+	ld a, #0xC3			; JP instruction
 	ld (0xFDFD), a
-	ld hl, #interrupt_handler
+	ld hl, #sprinter_bringup_int
 	ld (0xFDFE), hl
 
 	ld a, #0xFE
 	ld i, a
 	im 2
+
+	; Force _int_disabled=1 irrespective of boot state so the first
+	; `irqrestore(di())` pair does not accidentally enable interrupts
+	; while the kernel is still in bring-up.
+	ld a, #1
+	ld (_int_disabled), a
 
         ret
 
@@ -229,6 +245,34 @@ plt_interrupt_all:
         ret
 
 ;=========================================================================
+; sprinter_bringup_int - minimal IRQ stub used during platform bring-up.
+;
+; Any IM2 vector (CTC, SIO, ULA FRAME, ISA, etc) is routed here via the
+; table at 0xFE00.  We acknowledge the interrupt with `reti` but leave
+; IFF1 cleared so the kernel stays in its post-`di` state.  This is a
+; workaround for FUZIX's core `interrupt_handler` exit which always
+; clears _int_disabled and `ei`s -- once that runs a single stray IRQ
+; latches the CPU in an interrupt loop and main-flow progress stalls.
+; Once the kernel is stable we'll swap this out for the real dispatcher.
+;=========================================================================
+sprinter_bringup_int:
+        push af
+        push hl
+        ; Keep the FUZIX-visible "interrupts are masked" flag pinned at 1
+        ; so any upcoming irqrestore(saved) where saved==0 still skips
+        ; the `ei`.  This breaks the feedback loop.
+        ld hl, #_int_disabled
+        ld (hl), #1
+        pop hl
+        pop af
+        ; Do NOT `ei` before RETI: on Z80 `reti` by itself leaves IFF1
+        ; cleared, so the CPU stays masked and a repeating IRQ source
+        ; (ULA FRAME, CTC, etc) cannot immediately re-trigger us before
+        ; the kernel has a chance to make forward progress.  RETI still
+        ; issues the M1 sequence peripherals watch for acknowledgement.
+        reti
+
+;=========================================================================
 ; program_vectors - set exception vectors for a new process
 ;=========================================================================
 _program_vectors:
@@ -299,10 +343,13 @@ do_program_vectors:
 	ld (hl), #0x00
 	ldir
 
-	; install interrupt vector at 0x0038 (IM1 fallback)
+	; install interrupt vector at 0x0038 (IM1 fallback).
+	; Use sprinter_bringup_int (minimal RETI, no `ei`) during
+	; bring-up -- the core FUZIX interrupt_handler unconditionally
+	; re-enables interrupts on exit and we cannot afford that yet.
 	ld a, #0xC3			; JP instruction
 	ld (0x0038), a
-	ld hl, #interrupt_handler
+	ld hl, #sprinter_bringup_int
 	ld (0x0039), hl
 
 	; set restart vector for FUZIX system calls (RST 30h)
@@ -320,8 +367,9 @@ do_program_vectors:
 	ld hl, #nmi_handler
 	ld (0x0067), hl
 
-	; IM2 vector table and handler at 0xFDFD
-	; (already set up in init_hardware, but set for each process)
+	; IM2 vector table and handler at 0xFDFD.
+	; Must point at the same bring-up stub installed by init_hardware
+	; so that every process re-initialisation keeps interrupts masked.
 	ld hl, #0xFE00
 	ld de, #0xFE01
 	ld bc, #256
@@ -330,7 +378,7 @@ do_program_vectors:
 
 	ld a, #0xC3
 	ld (0xFDFD), a
-	ld hl, #interrupt_handler
+	ld hl, #sprinter_bringup_int
 	ld (0xFDFE), hl
 
 	ret

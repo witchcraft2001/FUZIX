@@ -118,6 +118,21 @@ void create_init(void)
 	EARLY_TRACE(0xC4);
 	add_argument("/init");
 	EARLY_TRACE(0xC5);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Read back the bytes we just wrote via ugetc.  If this shows
+	 * "/init\0" (0x2F 0x69 0x6E 0x69 0x74 0x00) the user-space
+	 * mapping is working end-to-end; if it shows something else the
+	 * uput path in add_argument didn't actually reach the u_page that
+	 * ugetc later reads from in _execve. */
+	EARLY_TRACE(0xCA);
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 256)));
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 257)));
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 258)));
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 259)));
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 260)));
+	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 261)));
+	EARLY_TRACE(0xCB);
+#endif
 }
 
 void complete_init(void)

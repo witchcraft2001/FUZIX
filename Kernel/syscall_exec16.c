@@ -115,6 +115,32 @@ arg_t _execve(void)
 	EX_TRACE(0xEB);
 	EX_TRACE((uint8_t)(uarg_t)exec_name);
 	EX_TRACE((uint8_t)(((uarg_t)exec_name) >> 8));
+	/* Sprinter bring-up: dump u_page[0..3] so we can confirm the
+	 * user-space mapping that ugetc is about to use points at the
+	 * pages add_argument wrote into, not kernel code / garbage. */
+	EX_TRACE(0xED);
+	EX_TRACE(((uint8_t *)&udata.u_page)[0]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[1]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[2]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[3]);
+	/* Sprinter bring-up write-then-read probe: force a uputc of a
+	 * sentinel byte 0xA5 at exec_name[0] then read it back.  If the
+	 * read does not return 0xA5 the ugetc path is mapping a different
+	 * physical frame than uputc (or one of them is silently bypassing
+	 * the u_page mapping entirely).  After the probe, re-stage
+	 * "/init\0" at exec_name so n_open_lock has a valid string. */
+	if ((uarg_t)exec_name) {
+		uputc(0xA5, (void *)exec_name);
+		EX_TRACE(0xDE);
+		EX_TRACE((uint8_t)ugetc((void *)exec_name));
+		EX_TRACE(0xDF);
+		uputc('/', (void *)exec_name);
+		uputc('i', (void *)((uarg_t)exec_name + 1));
+		uputc('n', (void *)((uarg_t)exec_name + 2));
+		uputc('i', (void *)((uarg_t)exec_name + 3));
+		uputc('t', (void *)((uarg_t)exec_name + 4));
+		uputc(0,   (void *)((uarg_t)exec_name + 5));
+	}
 	EX_TRACE(0xEF);
 	if ((uarg_t)exec_name) {
 		EX_TRACE((uint8_t)ugetc((void *)exec_name));

@@ -148,77 +148,70 @@ dd if=Images/sprinter/fuzix.img of=/dev/sdX bs=512 conv=fsync
 |-----------|--------|
 | Kernel build | ✅ Compiles and links cleanly |
 | Boot sector | ✅ Loads 8 kernel pages, MBR partition table embedded |
-| Video (80×32) | ✅ Native text mode via sprvideo.s |
-| PS/2 keyboard | ✅ Full Set 2 decoder, modifiers, VT100 sequences |
-| IDE storage | ✅ Driver written; untested on hardware |
+| Kernel startup (crt0) | ✅ Banking, stack at `kstack_top`, BSS/DATA zeroing, early banner |
+| Console text output | ✅ Direct VRAM writes to screen B via `sprvideo.s`, screen cleared by `init_hardware` |
+| PS/2 keyboard | ✅ Set 2 decoder, modifiers, VT100 sequences (polled — interrupts currently masked) |
+| IDE storage | ✅ Mount reads the superblock and inode blocks over 16-bit ports |
+| Root filesystem mount | ✅ `hda1` mounts and root inode opens |
+| `_execve /init` | ✅ Resolves `/init`, loads the binary, PID 1 starts running in user space |
 | CMOS RTC | ✅ Read-only BCD access |
 | Filesystem image | ✅ Built by `make diskimage` |
-| Emulator test (MAME) | 🔲 Not yet tested |
+| Interrupt dispatcher | ⚠️ Bring-up stub (`sprinter_bringup_int`) — `reti` without `ei`, IRQs stay masked |
+| Init hang | 🔲 `/init` runs but stalls shortly after "Starting /init" — syscall path from user space to be investigated |
 | FDD (WD1793) | 🔲 Not implemented |
 
-## Bring-Up Recovery Point (2026-04-17)
+## Current Bring-Up State
 
-This section tracks the current stabilization point for `/init` bring-up on Sprinter,
-so a new session can continue from the same state.
+`make diskimage TARGET=sprinter` produces `Images/sprinter/fuzix.img` (and
+`fuzix.chd` if `chdman` is available).  Booting that image in MAME's Sprinter
+driver reaches the following milestones:
 
-### Goal
+1. BIOS boot sector messages.
+2. `CRT0` banner written directly to VRAM at row 0 (proof-of-life from
+   `crt0.s`).
+3. Kernel banner (`FUZIX version ...`, copyrights, `Devboot`) via `kprintf`.
+4. Root filesystem mount from `hda1` completes.
+5. Kernel prints `Starting /init`.
+6. `/init` is exec'd — `PC` moves into user space (WIN0 mapped to a user
+   page), syscalls fire, `trace_idx` climbs past 200.
+7. Execution stalls with no further on-screen output; the next target is to
+   find which syscall / resource init is waiting on.
 
-- Boot reaches mounted root FS and runs `/init` reliably.
-- Avoid memory-corrupting recovery hacks.
-- Eliminate `panic: killed init` by fixing the real cause of PID1 `_exit(-1)`.
+Interrupts are held masked during bring-up.  `sprinter_bringup_int` replaces
+FUZIX's core `interrupt_handler` in both the IM2 vector table at `0xFDFD`
+and the IM1 vector at `0x0038`; it simply RETIs without re-enabling IFF1,
+and forces `_int_disabled = 1` so a subsequent `irqrestore(saved)` where
+`saved == 0` does not turn IRQs back on.  CTC channels are reset at init
+time to guarantee they don't raise TINT.
 
-### Current Safe State
+### Diagnostics still in place
 
-- System is in deterministic panic mode again (no disk image corruption, no full-trace `0xFF` flood).
-- Main reproducible failure currently ends in `plt_monitor` (`PC=0xEE65`) with panic text `no /init`.
-- Current `_execve` bring-up instrumentation shows `u_argn == 0` at entry (`E8 00 00`), but fallback write path (`EC`) still does not execute in failing runs.
+The following temporary instrumentation is carried while init is being
+brought up and should be removed once the kernel stabilises:
 
-### Last Known-Useful Fixes Kept
+- `crt0.s` paints the ZX border port (`0xFE`) at five points during startup
+  and calls `early_banner` to write `CRT0` to VRAM.
+- `start.c` dumps `udata.u_argn*` before and after `complete_init` and reads
+  the just-written `/init` string back via `ugetc` (markers `0xCA` / `0xCB`).
+- `syscall_exec16.c` dumps `udata.u_page[0..3]` at `_execve` entry (marker
+  `0xED`), runs a `uputc 0xA5 + ugetc` sentinel probe (markers `0xDE` /
+  `0xDF`) and re-stages `/init\0` into user space immediately before
+  `n_open_lock` to work around a page-reuse bug (see below).
+- Many `FM_/DIO_/TD_/IDE_/EX_/PROC_TRACE` call sites throughout the core
+  kernel; they feed the circular trace buffer at `_sprinter_trace_buf`
+  (256 bytes in `_COMMONDATA`).  `_plt_trace` only writes to memory — it
+  does NOT touch any border / VID port, because the I/O ports in the
+  `0xC0..0xCF` range share decoder bits with the WIN2 / banking registers
+  on Sprinter.
 
-- `Kernel/platform/platform-sprinter/usermem.s`: `__uput`/slow-path fixes (required for valid `/init` string path writes).
-- `Kernel/cpu-z80/lowlevel-z80-banked.s`: `null_handler` now sets syscall number in `A` before `unix_syscall_entry` calls:
-  - `A=39` for `signal(getpid(), SIGBUS)`
-  - `A=0` for `_exit`
+### Known bug kept under workaround
 
-### Recovery Hooks Disabled Again
-
-- Automatic PID1 restart from `doexit()` removed.
-- Automatic `exec_or_die()` on bogus syscall (`u_callno & 0x80`) removed.
-- Forced marker-based restart path in `_execve()` removed.
-
-These hooks were useful for diagnosis but caused unstable behavior in some runs.
-
-### Latest Trace Signature (authoritative)
-
-Current observed signatures (latest runs):
-
-- `... C2 4F 01 00 ... C3 00 01 00 08 ...`
-  - PID1 syscall `0x4F` (`getsid`) returns success.
-- **Signature A (`PANIC_NOINIT`)**
-  - `... F1 D2 08 D1 08 D0 08 ... DB F2 F2 DC 6E 6F 20 2F ...`
-  - `_execve` enters with null/garbage exec name (`E7 00 00`, `EB 00 00`, `EF 00...`) and panics `no /init`.
-- **Signature A2 (`PANIC_NOINIT` with fallback diagnostics)**
-  - `... E8 00 00 01 ... E7 00 00 EA 00 00 EB 00 00 EF 00...`
-  - PID1 (`01`) enters `_execve` with null exec pointer, but expected fallback marker `EC` is absent before panic.
-- **Signature B (`PANIC_WANTBSYB`)**
-  - `... DB C7 C7 DC 77 61 6E 74 ...`
-  - panic string starts with `want` (`PANIC_WANTBSYB`, "want busy block").
-- **Signature C (guard hit + unstable flow)**
-  - `... E6 ... EB 40 40 EF 2F 69 6E 69 74 00 ...`
-  - PID1 exec-name guard rewrites to `/init`, then run may still jump to low-memory garbage (`PC ~ 0x004F`).
-
-Latest snapshot details (2026-04-17, cycles 297/217):
-
-- `PC=0xEE65`, `SP=0xFBE8`, `PG0=0x0148`, `PG1=0x014C`, `PG2=0x01FE`, `PG3=0x014B`
-- Trace around failure:
-  - `... E8 00 00 01 E0 E7 00 00 EA 00 00 EB 00 00 EF 00 00 00 00 00 00 ...`
-  - `... F1 D2 08 D1 08 D0 08 DA 08 ... DB F2 F2 DC 6E 6F 20 2F ...`
-
-### Next Debug Target
-
-- Explain why `_execve` fallback path is skipped despite `u_argn==0` (`E8 00 00`) and PID1 (`01`).
-- Keep changes minimal and deterministic (no aggressive restart guards).
-- Once `EC`/valid `exec_name` path is stable, continue toward previous target: reproduce and fix `killed init` (`_exit(-1)` from PID1).
+Between `create_init` (where `add_argument("/init")` writes the path into
+init's user pages) and `_execve` (where `n_open_lock` reads it), the
+user page holding `PROGLOAD + 256` gets reused by some other kernel code
+path and the "/init" bytes disappear.  The workaround is the re-stage step
+in `_execve` listed above.  Tracking the real culprit is open — see the
+task list in the session notes.
 
 ### Rebuild Command
 

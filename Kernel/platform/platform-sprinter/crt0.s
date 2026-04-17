@@ -92,9 +92,13 @@ init:
 	inc hl
 	ld (hl), #0x4B
 
-	; switch to a high stack in fixed common window (0xC000-0xFFFF).
-	; keep it well above kernel globals/debug buffers around 0xF800.
-	ld sp, #0xFC00
+	; Install the kernel stack.  kstack_top lives in the u_block
+	; defined by cpu-z80/std-commonmem.s (linked into _COMMONMEM at
+	; 0xEE00..0xF000) and sits at the top of a 512-byte region that
+	; grows down toward _udata.  Using this symbol (instead of a
+	; hard-coded address) keeps the stack above the _COMMONDATA
+	; globals allocated just past _COMMONMEM.
+	ld sp, #kstack_top
 
 	; ---- Diagnostic marker #3 (border = magenta): stack valid ----
 	ld a, #0x03
@@ -163,7 +167,10 @@ stop:   halt
 ; (white ink on black paper).
 ;-----------------------------------------------------------------------
 early_banner:
-	; Save current WIN2 page selector (we assume it's 0x4A, set above)
+	; Map VRAM page #50 into WIN2.  WIN2 came in holding kernel
+	; bank1-high (page 0x4A) from the banking setup above, and we
+	; restore that value before returning (see eb_done), so the loop
+	; body is free to write into 0x8000-0xBFFF as VRAM.
 	ld a, #0x50			; VRAM page
 	out (MPGSEL_2), a
 
