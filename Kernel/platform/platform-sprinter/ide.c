@@ -108,18 +108,24 @@ ide_wr_do:
 }
 
 /*
- *	IDE data read - read 512 bytes from the data port
+ *	IDE data read - read 512 bytes from the data port.
  *
- *	Uses INI loop with C=0x50.
- *	INI reads from port (C) with B as high address byte, then decrements B.
- *	The Sprinter DCP decodes only the low byte for the data port,
- *	so varying B during the loop is fine.
+ *	Uses INI-style loop with the data port at C=0x50 (Sprinter DCP
+ *	only decodes the low byte of the 16-bit port so the B register
+ *	value is don't-care for the actual transfer).
+ *
+ *	Before the transfer we map the right physical pages into WIN0..
+ *	WIN2 based on td_raw:
+ *	  td_raw == 0  → buffer-cache read   (map_buffers)
+ *	  td_raw == 1  → direct user-space   (map_proc_always)
+ *	  td_raw == 2  → swap page            (map_for_swap with td_page)
+ *	A matching map_kernel_restore on exit puts the kernel mapping
+ *	back before we return to the disk driver.
  */
 void devide_read_data(uint8_t *dptr) __naked
 {
 	dptr;
 	__asm
-		; SDCC banked call frame: args start at SP+4.
 		ld hl, #4
 		add hl, sp
 		ld e, (hl)
@@ -127,28 +133,47 @@ void devide_read_data(uint8_t *dptr) __naked
 		ld d, (hl)
 		ex de, hl		; HL = destination address
 
+		push hl
+		ld a, (_td_raw)
+#ifdef SWAPDEV
+		cp #2
+		jr nz, ide_rd_data_not_swap
+		ld a, (_td_page)
+		call map_for_swap
+		jr ide_rd_data_go
+ide_rd_data_not_swap:
+#endif
+		or a
+		jr nz, ide_rd_data_user
+		call map_buffers
+		jr ide_rd_data_go
+ide_rd_data_user:
+		call map_proc_always
+ide_rd_data_go:
+		pop hl
+
 		ld bc, #0x0050		; fixed IDE data port
 		ld de, #0x0200		; 512 bytes
-1$:
+ide_rd_loop:
 		in a, (c)
 		ld (hl), a
 		inc hl
 		dec de
 		ld a, d
 		or e
-		jr nz, 1$
-		ret
+		jr nz, ide_rd_loop
+		jp map_kernel_restore
 	__endasm;
 }
 
 /*
- *	IDE data write - write 512 bytes to the data port
+ *	IDE data write - write 512 bytes to the data port.
+ *	Source-side mapping mirrors the read path above.
  */
 void devide_write_data(uint8_t *dptr) __naked
 {
 	dptr;
 	__asm
-		; SDCC banked call frame: args start at SP+4.
 		ld hl, #4
 		add hl, sp
 		ld e, (hl)
@@ -156,16 +181,35 @@ void devide_write_data(uint8_t *dptr) __naked
 		ld d, (hl)
 		ex de, hl		; HL = source address
 
+		push hl
+		ld a, (_td_raw)
+#ifdef SWAPDEV
+		cp #2
+		jr nz, ide_wr_data_not_swap
+		ld a, (_td_page)
+		call map_for_swap
+		jr ide_wr_data_go
+ide_wr_data_not_swap:
+#endif
+		or a
+		jr nz, ide_wr_data_user
+		call map_buffers
+		jr ide_wr_data_go
+ide_wr_data_user:
+		call map_proc_always
+ide_wr_data_go:
+		pop hl
+
 		ld bc, #0x0050		; fixed IDE data port
 		ld de, #0x0200		; 512 bytes
-1$:
+ide_wr_loop:
 		ld a, (hl)
 		out (c), a
 		inc hl
 		dec de
 		ld a, d
 		or e
-		jr nz, 1$
-		ret
+		jr nz, ide_wr_loop
+		jp map_kernel_restore
 	__endasm;
 }

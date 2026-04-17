@@ -32,8 +32,10 @@ uint_fast8_t plt_param(unsigned char *p)
 void plt_interrupt(void)
 {
 	/*
-	 * Temporary bring-up mode: avoid scheduler/timer activity while
-	 * early Sprinter memory mapping is being stabilized.
+	 * Fires from the IM2 dispatcher on every masked interrupt the
+	 * CPU accepts.  Kept empty during bring-up so we can verify the
+	 * interrupt plumbing in isolation; once the basic path is stable
+	 * this will call timer_interrupt() and kbd_poll().
 	 */
 }
 

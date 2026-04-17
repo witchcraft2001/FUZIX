@@ -343,13 +343,16 @@ do_program_vectors:
 	ld (hl), #0x00
 	ldir
 
-	; install interrupt vector at 0x0038 (IM1 fallback).
-	; Use sprinter_bringup_int (minimal RETI, no `ei`) during
-	; bring-up -- the core FUZIX interrupt_handler unconditionally
-	; re-enables interrupts on exit and we cannot afford that yet.
+	; install interrupt vector at 0x0038 (IM1 fallback) and at the
+	; IM2 slot.  This runs for every new process created by makeproc,
+	; i.e. once the kernel has progressed far enough to spawn PID1.
+	; Use FUZIX's full interrupt_handler here so the scheduler, signal
+	; delivery and pre-emption all work once user space starts.  The
+	; early-boot stub (sprinter_bringup_int) installed by
+	; init_hardware is replaced on the first program_vectors call.
 	ld a, #0xC3			; JP instruction
 	ld (0x0038), a
-	ld hl, #sprinter_bringup_int
+	ld hl, #interrupt_handler
 	ld (0x0039), hl
 
 	; set restart vector for FUZIX system calls (RST 30h)
@@ -368,8 +371,6 @@ do_program_vectors:
 	ld (0x0067), hl
 
 	; IM2 vector table and handler at 0xFDFD.
-	; Must point at the same bring-up stub installed by init_hardware
-	; so that every process re-initialisation keeps interrupts masked.
 	ld hl, #0xFE00
 	ld de, #0xFE01
 	ld bc, #256
@@ -378,7 +379,7 @@ do_program_vectors:
 
 	ld a, #0xC3
 	ld (0xFDFD), a
-	ld hl, #sprinter_bringup_int
+	ld hl, #interrupt_handler
 	ld (0xFDFE), hl
 
 	ret
