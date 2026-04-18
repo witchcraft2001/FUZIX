@@ -153,11 +153,13 @@ dd if=Images/sprinter/fuzix.img of=/dev/sdX bs=512 conv=fsync
 | PS/2 keyboard | ✅ Set 2 decoder, modifiers, VT100 sequences (polled — interrupts currently masked) |
 | IDE storage | ✅ Mount reads the superblock and inode blocks over 16-bit ports |
 | Root filesystem mount | ✅ `hda1` mounts and root inode opens |
-| `_execve /init` | ✅ Resolves `/init`, loads the binary, PID 1 starts running in user space |
+| `_execve /init` | ✅ Resolves `/init`, loads the binary correctly into user pages |
+| User-mode entry | ✅ `doexec` jumps to `/init` at 0x0112, `u_page = {user, user, user}`, vectors installed |
 | CMOS RTC | ✅ Read-only BCD access |
 | Filesystem image | ✅ Built by `make diskimage` |
 | Interrupt dispatcher | ⚠️ Bring-up stub (`sprinter_bringup_int`) — `reti` without `ei`, IRQs stay masked |
-| Init hang | 🔲 `/init` runs but stalls shortly after "Starting /init" — syscall path from user space to be investigated |
+| Disk writes | ⚠️ `bdwrite` / `devide_write_data` no-op'd during bring-up (safety net) |
+| Init post-exec | 🔲 `/init` enters user space, then NMI fires — `[NMI]` prints, kernel halts |
 | FDD (WD1793) | 🔲 Not implemented |
 
 ## Current Bring-Up State
@@ -172,46 +174,98 @@ driver reaches the following milestones:
 3. Kernel banner (`FUZIX version ...`, copyrights, `Devboot`) via `kprintf`.
 4. Root filesystem mount from `hda1` completes.
 5. Kernel prints `Starting /init`.
-6. `/init` is exec'd — `PC` moves into user space (WIN0 mapped to a user
-   page), syscalls fire, `trace_idx` climbs past 200.
-7. Execution stalls with no further on-screen output; the next target is to
-   find which syscall / resource init is waiting on.
+6. `/init` is exec'd — `_execve` loads 18 KB of binary, ugetc read-back at
+   0x0110 / 0x35FE / 0x47FE matches `Applications/util/init` byte-for-byte.
+7. `doexec` jumps to user entry at 0x0112 with `u_page = {0x45, 0x44, 0x43}`
+   mapped and `SP = 0xEDEE`.
+8. Shortly after, `[NMI]` appears on the console and the kernel drops into
+   `plt_monitor`.  Source of the NMI is the next target (Z84C15 WDT? ULA
+   NMI line? spurious bus fault?).
 
-Interrupts are held masked during bring-up.  `sprinter_bringup_int` replaces
-FUZIX's core `interrupt_handler` in both the IM2 vector table at `0xFDFD`
-and the IM1 vector at `0x0038`; it simply RETIs without re-enabling IFF1,
-and forces `_int_disabled = 1` so a subsequent `irqrestore(saved)` where
-`saved == 0` does not turn IRQs back on.  CTC channels are reset at init
-time to guarantee they don't raise TINT.
+### Key fixes that got PID 1 into user space
+
+Four stacked bugs were silently corrupting the user-memory copy path.
+Each fix is required for the next to matter:
+
+1. **`usermem.s:uputget_put` arg order**.  `BC` was loaded from offset 8
+   (dst) and `DE` from offset 10 (count).  The fast path then used the
+   user pointer as an `ldir` count, and the slow path wrote every
+   source byte to one remapped address derived from `count`.  Fixed
+   to match `uputget`: `BC = count`, `DE = dst`.
+
+2. **`uput_slow_loop` clobbered source byte**.  The loop did `pop af`
+   (restore source byte into `A`) and then `call user_map_de`, which
+   overwrites `A` with `(dst_hi & 0x3F) | 0x40`.  The subsequent
+   `ld (hl), a` then wrote that value instead of the real byte — user
+   RAM filled with a monotonic pattern that parsed as `HALT` near
+   0x3600 and as `NOP`s elsewhere.  Reordered so `user_map_de` runs
+   first, `pop af` happens just before the write.
+
+3. **`pv_ptr_valid` rejected common-memory pointers**.  The bring-up
+   sanity check dropped any pointer with high byte ≥ 0x80.  Since
+   `&udata.u_page` is at 0xEExx on this platform, every call to
+   `program_vectors(&u_page)` fell back to mapping the kernel and
+   wrote the JP null_handler stubs into kernel page 0x48 instead of
+   the new user page.  The first timer IRQ after `doexec` then tripped
+   the null-pointer check (user 0x0000 was all zeros, not `0xC3`) and
+   forced `_doexit(9)` = SIGKILL on PID 1.  High-byte test removed.
+
+4. **Direct-IO path via `CONFIG_LARGE_IO_DIRECT`** fed IDE data
+   straight into user memory through `map_proc_always`.  With the
+   bugs above live, the transfer landed in kernel code in RAM and
+   occasionally triggered wild IDE write bursts that corrupted the
+   on-disk image across reboots.  Disabled for now — every block goes
+   through the buffer cache and `uputblk`.
+
+### Interrupt handling during bring-up
+
+Interrupts are held masked.  `sprinter_bringup_int` replaces FUZIX's core
+`interrupt_handler` in both the IM2 vector table at `0xFDFD` and the IM1
+vector at `0x0038`.  The stub:
+
+- Checks `udata.u_insys`.  If zero (user code was running) it jumps to
+  the real `interrupt_handler` so the scheduler, signals and keyboard
+  polling work.
+- If non-zero (kernel/syscall in progress) it pins `_int_disabled = 1`
+  and `reti` without re-enabling IFF1, to break the IRQ storm that
+  FUZIX's normal dispatcher exit path (`xor a; ld (_int_disabled),a;
+  ei`) causes against a level-sensitive ULA FRAME pin on Sprinter.
+
+`plt_interrupt` advances `timer_interrupt()` and polls the PS/2 keyboard
+on each accepted IRQ.  `plt_idle` polls `kbd_poll + timer_interrupt`
+rather than `HALT`ing — with the bring-up dispatcher RETIing without EI,
+a HALT here would wait for an IRQ that never dispatches.
+
+CTC channels are reset at init so they cannot raise TINT.
+
+### Safety net: disk writes disabled
+
+`bdwrite` (in `devio.c`) and `_devide_write_data` (in `sprinter.s`) are
+both no-op'd while `CONFIG_SPRINTER_EARLY_TRACE` is set.  Kernel code
+cannot issue the IDE `0x30` write-sector command.  This kept the on-disk
+image intact while the user-copy bugs above were being hunted; needs to
+be restored once PID 1 is stable.
 
 ### Diagnostics still in place
 
-The following temporary instrumentation is carried while init is being
-brought up and should be removed once the kernel stabilises:
+Temporary instrumentation that should be removed once the kernel
+stabilises:
 
-- `crt0.s` paints the ZX border port (`0xFE`) at five points during startup
-  and calls `early_banner` to write `CRT0` to VRAM.
-- `start.c` dumps `udata.u_argn*` before and after `complete_init` and reads
-  the just-written `/init` string back via `ugetc` (markers `0xCA` / `0xCB`).
-- `syscall_exec16.c` dumps `udata.u_page[0..3]` at `_execve` entry (marker
-  `0xED`), runs a `uputc 0xA5 + ugetc` sentinel probe (markers `0xDE` /
-  `0xDF`) and re-stages `/init\0` into user space immediately before
-  `n_open_lock` to work around a page-reuse bug (see below).
-- Many `FM_/DIO_/TD_/IDE_/EX_/PROC_TRACE` call sites throughout the core
-  kernel; they feed the circular trace buffer at `_sprinter_trace_buf`
-  (256 bytes in `_COMMONDATA`).  `_plt_trace` only writes to memory — it
-  does NOT touch any border / VID port, because the I/O ports in the
-  `0xC0..0xCF` range share decoder bits with the WIN2 / banking registers
-  on Sprinter.
-
-### Known bug kept under workaround
-
-Between `create_init` (where `add_argument("/init")` writes the path into
-init's user pages) and `_execve` (where `n_open_lock` reads it), the
-user page holding `PROGLOAD + 256` gets reused by some other kernel code
-path and the "/init" bytes disappear.  The workaround is the re-stage step
-in `_execve` listed above.  Tracking the real culprit is open — see the
-task list in the session notes.
+- `crt0.s` paints the ZX border port (`0xFE`) at five points during
+  startup and calls `early_banner` to write `CRT0` to VRAM.
+- `start.c` dumps `udata.u_argn*` before and after `complete_init` and
+  reads the just-written `/init` string back via `ugetc` (markers
+  `0xCA` / `0xCB`).
+- `syscall_exec16.c` dumps `udata.u_page[0..3]` at `_execve` entry
+  (marker `0xED`), runs a `uputc 0xA5 + ugetc` sentinel probe (markers
+  `0xDE` / `0xDF`), re-stages `/init\0` into user space before
+  `n_open_lock` and verifies the loaded binary via ugetc at a few
+  addresses (markers `0xB3 / 0xB0 / 0xB1 / 0xB2`).
+- `FM_/DIO_/TD_/IDE_/EX_/PROC_TRACE` call sites feed a 512-byte circular
+  trace buffer at `_sprinter_trace_buf` (16-bit index).  `_plt_trace`
+  only writes to memory — it does not touch any border/VID port,
+  because the 0xC0..0xCF range shares decoder bits with the WIN2 /
+  banking registers.
 
 ### Rebuild Command
 
@@ -220,3 +274,14 @@ make diskimage TARGET=sprinter
 ```
 
 Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.
+
+### Next targets
+
+1. Silence / investigate the NMI that fires after `doexec` (Z84C15 WDT,
+   ULA NMI, bus fault).
+2. Re-enable the standard `interrupt_handler` exit path once the IRQ
+   source is understood — ack ULA FRAME, restore `EI; RETI` so the
+   scheduler can actually preempt.
+3. Wire `/dev/console` through `devtty.c` so getty can open a terminal.
+4. Remove the bring-up no-ops and trace markers once PID 1 reaches a
+   login prompt.

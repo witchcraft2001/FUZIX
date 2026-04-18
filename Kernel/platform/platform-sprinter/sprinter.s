@@ -287,6 +287,27 @@ sprinter_bringup_to_kernel:
         jp interrupt_handler
 
 ;=========================================================================
+; sprinter_nmi_stub - absorb NMI without printing / panicking.
+;
+; Z80 NMI pushes PC and jumps to 0x0066.  do_program_vectors writes
+; `JP sprinter_nmi_stub` there.  We increment a counter so the trace
+; of how often it fires is visible, then RETN to return control to the
+; interrupted code.  RETN restores IFF1 from IFF2 (which is the saved
+; pre-NMI interrupt-enable state), so we don't change the kernel's
+; IRQ state.
+;=========================================================================
+sprinter_nmi_stub:
+        push af
+        push hl
+        ld hl, #_sprinter_nmi_count
+        inc (hl)
+        pop hl
+        pop af
+        retn
+
+        .globl _sprinter_nmi_count
+
+;=========================================================================
 ; devide_read_data / devide_write_data - IDE bulk data transfer
 ;
 ; These must live in _COMMONMEM (WIN3) rather than the bank 1 code page
@@ -455,9 +476,14 @@ do_program_vectors:
 	ld hl, #null_handler
 	ld (0x0001), hl
 
-	; NMI vector at 0x0066
+	; NMI vector at 0x0066.  During bring-up we do NOT want the
+	; FUZIX default nmi_handler (which prints "[NMI]" and drops into
+	; plt_monitor) -- on Sprinter some edge fires NMI after /init
+	; enters user space and we need the system to stay alive long
+	; enough to figure out why.  Point the vector at a local stub
+	; that simply RETNs so NMIs are absorbed silently.
 	ld (0x0066), a
-	ld hl, #nmi_handler
+	ld hl, #sprinter_nmi_stub
 	ld (0x0067), hl
 
 	; IM2 vector table and handler at 0xFDFD.
@@ -975,6 +1001,9 @@ _int_disabled:
 	.db 1
 
 _sprinter_trace_last:
+	.db 0
+
+_sprinter_nmi_count:
 	.db 0
 
 _sprinter_trace_idx:
