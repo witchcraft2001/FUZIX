@@ -33,9 +33,15 @@
 	.globl _dev_tab
 	.globl _int_disabled
 	.globl _sprinter_trace_last
+	.globl _sprinter_nullh_count
 	.globl _sprinter_trace_idx
 	.globl _sprinter_trace_buf
 	.globl _sprinter_dbg
+	.globl _sprinter_last_exec_path
+	.globl _sprinter_last_exec_hdr
+	.globl _sprinter_last_exec_base
+	.globl _sprinter_last_exec_count
+	.globl _sprinter_last_exec_top
 	.globl _td_op
 	.globl _devide_read_data
 	.globl _devide_write_data
@@ -1005,6 +1011,24 @@ _sprinter_trace_last:
 
 _sprinter_nmi_count:
 	.db 0
+
+_sprinter_nullh_count:
+	.db 0
+
+_sprinter_last_exec_path:
+	.ds 32			; zero-terminated copy of most recent _execve arg
+
+_sprinter_last_exec_hdr:
+	.ds 16			; raw bytes of most recent exec header read by _execve
+
+_sprinter_last_exec_base:
+	.dw 0			; snapshot of udata.u_base before valaddr_r check
+
+_sprinter_last_exec_count:
+	.dw 0			; snapshot of udata.u_count before valaddr_r check
+
+_sprinter_last_exec_top:
+	.dw 0			; snapshot of udata.u_top before valaddr_r check
 
 _sprinter_trace_idx:
 	.dw 0			; 16-bit index to address a larger buffer

@@ -59,6 +59,8 @@
 	.globl _chksigs
 	.globl _int_disabled
         .globl _plt_monitor
+        .globl _plt_trace
+        .globl _sprinter_nullh_count
         .globl _unix_syscall
         .globl outstring
         .globl kstack_top
@@ -314,26 +316,20 @@ _doexec:
 ;  FIXME: hardcoded RST30 won't work on all boxes
 ;
 null_handler:
-	; kernel jump to NULL is bad
-	ld a, (_udata + U_DATA__U_INSYS)
-	or a
-	jp nz, trap_illegal
-	; user is merely not good
-	ld hl, #7
+	; Sprinter bring-up: count every entry to null_handler so we can see
+	; from memory dumps how many times user (and kernel) jumped to NULL.
+	push af
 	push hl
-	ld ix, (_udata + U_DATA__U_PTAB)
-	ld l,P_TAB__P_PID_OFFSET(ix)
-	ld h,P_TAB__P_PID_OFFSET+1(ix)
-	push hl
-	ld hl, #39		; signal (getpid(), SIGBUS)
-	ld a, #39
-	call unix_syscall_entry; syscall
-	ld hl, #0xFFFF
-	push hl
-	dec hl			; #0
-	push hl
-	ld a, #0
-	call unix_syscall_entry; exit
+	ld hl, #_sprinter_nullh_count
+	inc (hl)
+	pop hl
+	pop af
+	; Rather than try to recover by sending SIGBUS + exit syscall from
+	; within this irregular context (which can recurse into null_handler
+	; a second time while INSYS=1 and trip trap_illegal → plt_monitor),
+	; just jump directly into plt_monitor so the halt is recorded with a
+	; clean trace marker and without cascading failures.
+	jp _plt_monitor
 
 
 

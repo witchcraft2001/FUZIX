@@ -150,23 +150,28 @@ dd if=Images/sprinter/fuzix.img of=/dev/sdX bs=512 conv=fsync
 | Boot sector | ✅ Loads 8 kernel pages, MBR partition table embedded |
 | Kernel startup (crt0) | ✅ Banking, stack at `kstack_top`, BSS/DATA zeroing, early banner |
 | Console text output | ✅ Direct VRAM writes to screen B via `sprvideo.s`, screen cleared by `init_hardware` |
-| PS/2 keyboard | ✅ Set 2 decoder, modifiers, VT100 sequences (polled — interrupts currently masked) |
-| IDE storage | ✅ Mount reads the superblock and inode blocks over 16-bit ports |
+| PS/2 keyboard | ✅ Set 2 decoder, modifiers, VT100 sequences; input echoes to screen |
+| IDE storage | ✅ Mount reads superblock and inode blocks over 16-bit ports |
 | Root filesystem mount | ✅ `hda1` mounts and root inode opens |
 | `_execve /init` | ✅ Resolves `/init`, loads the binary correctly into user pages |
-| User-mode entry | ✅ `doexec` jumps to `/init` at 0x0112, `u_page = {user, user, user}`, vectors installed |
+| User-mode entry | ✅ `doexec` jumps to `/init` at 0x0112, user pages mapped, vectors installed |
+| Cross-bank syscall dispatch | ✅ `_STUBS` trampolines + `__stub_0_N` banking switch call CODE1/2/3 correctly |
+| IRQ handling (user context) | ✅ Timer + PS/2 IRQs dispatch through `sprinter_bringup_int` without IRQ storm |
+| Stable pause() loop | ✅ Minimal `/init` enters `pause()` in user space and stays sleeping |
 | CMOS RTC | ✅ Read-only BCD access |
 | Filesystem image | ✅ Built by `make diskimage` |
-| Interrupt dispatcher | ⚠️ Bring-up stub (`sprinter_bringup_int`) — `reti` without `ei`, IRQs stay masked |
+| `/bin/sh` in filesystem | ✅ Shipped via `V7-sh` package |
 | Disk writes | ⚠️ `bdwrite` / `devide_write_data` no-op'd during bring-up (safety net) |
-| Init post-exec | 🔲 `/init` enters user space, then NMI fires — `[NMI]` prints, kernel halts |
+| Interrupt dispatcher | ⚠️ Bring-up stub (`sprinter_bringup_int`) — absorbs IRQ when `u_insys=1` |
+| Real `/init` (`Applications/util/init`) | 🔲 Triggers `PANIC_INODE_FREED` in `i_deref` during `open("/dev/tty1")` path |
+| Interactive shell `/bin/sh` | 🔲 Blocked on full init → getty → login flow |
 | FDD (WD1793) | 🔲 Not implemented |
 
 ## Current Bring-Up State
 
 `make diskimage TARGET=sprinter` produces `Images/sprinter/fuzix.img` (and
 `fuzix.chd` if `chdman` is available).  Booting that image in MAME's Sprinter
-driver reaches the following milestones:
+driver now reaches a **stable userland idle state**:
 
 1. BIOS boot sector messages.
 2. `CRT0` banner written directly to VRAM at row 0 (proof-of-life from
@@ -174,13 +179,79 @@ driver reaches the following milestones:
 3. Kernel banner (`FUZIX version ...`, copyrights, `Devboot`) via `kprintf`.
 4. Root filesystem mount from `hda1` completes.
 5. Kernel prints `Starting /init`.
-6. `/init` is exec'd — `_execve` loads 18 KB of binary, ugetc read-back at
-   0x0110 / 0x35FE / 0x47FE matches `Applications/util/init` byte-for-byte.
-7. `doexec` jumps to user entry at 0x0112 with `u_page = {0x45, 0x44, 0x43}`
-   mapped and `SP = 0xEDEE`.
-8. Shortly after, `[NMI]` appears on the console and the kernel drops into
-   `plt_monitor`.  Source of the NMI is the next target (Z84C15 WDT? ULA
-   NMI line? spurious bus fault?).
+6. `_execve` loads the minimal `/init` binary (80 bytes) — header validates,
+   pagemap_realloc allocates user pages, `readi` copies code into the new
+   user window, `program_vectors` installs the `JP null_handler` / `JP
+   unix_syscall_entry` vectors at user 0x0000 / 0x0030.
+7. Kernel prints `KERNEL OK - userland running` right before `doexec`.
+8. `doexec` jumps to user entry at 0x0112 with `u_page = {0x45, 0x44, 0x43,
+   0x46}`, SP = `u_isp` = 0xEDEE, INSYS = 0 and IRQs enabled.
+9. User init executes `ld a,37; call 0x0100` — enters `_pause` via the
+   `_STUBS` trampoline at 0x0301 + 37·6 → bank switch to CODE2 via
+   `__stub_0_2` → `psleep(0)`.
+10. Timer IRQs and PS/2 keystrokes are delivered.  `sprinter_bringup_int`
+    routes IRQs to the real handler when `u_insys = 0` and absorbs them
+    (setting `_int_disabled`, `reti`) when `u_insys = 1`, so there is no
+    IRQ storm.  Keyboard input echoes on-screen.
+
+At this point PID 1 is alive, looping in `pause()`, IRQs are serviced and
+the machine is responsive.  No panic, no `trap_illegal`, no `plt_monitor`.
+
+### Milestone: stable boot-to-userland (April 2026)
+
+Reached via a sequence of fixes, each of which exposed the next issue:
+
+1. **`usermem.s:uputget_put` / `uput_slow_loop` argument corruption** —
+   user memory was not actually being written with the correct bytes during
+   execve's `readi`.  Fixed register ordering and deferred `user_map_de`
+   until after the source byte is restored from the stack.
+
+2. **`pv_ptr_valid` rejected common-memory pointers** — `&udata.u_page` lives
+   at 0xEExx, so the "reject high-byte ≥ 0x80" sanity check diverted
+   `program_vectors` into the kernel page.  User page 0 never received the
+   `JP null_handler` stub, and the first timer IRQ after `doexec` tripped
+   the null-pointer check → `_doexit(SIGKILL)` on PID 1.
+
+3. **`CONFIG_LARGE_IO_DIRECT` corrupted kernel RAM** — direct IDE-to-user
+   transfers used a stale user mapping and wrote IDE data into kernel code
+   pages.  Disabled during bring-up.
+
+4. **Cross-bank syscall dispatch verified** — `syscall_dispatch[]` in `_CONST`
+   holds the address of a 6-byte stub per syscall (e.g. stub 0x0301 for
+   `_exit`, stub 0x03EB for `_kill`).  Each stub: `ld de,#target; jp
+   __stub_0_N` where N is the target's bank.  `__stub_0_N` saves the
+   current bank, maps the target bank via `MPGSEL_1/2`, calls the target
+   (`jp (hl)` on the target address), then restores the caller's bank.
+   All 80 syscall numbers dispatch correctly without requiring every
+   kernel function to live in one bank.
+
+5. **`null_handler` no longer cascades into a second fault** — the old
+   sequence (`push 7; push pid; call unix_syscall_entry` = kill, then
+   `push 0xFFFF; push 0xFFFE; call unix_syscall_entry` = exit) could
+   re-enter `null_handler` with `INSYS = 1`, tripping `trap_illegal`.
+   Replaced with `jp _plt_monitor` so the machine halts cleanly on a
+   genuine user-land NULL jump (which no longer happens in the current
+   path but is kept for safety).  `_sprinter_nullh_count` at 0xFBB0
+   tracks every entry so a dump tells us whether the path ever fires.
+
+6. **Minimal `/init`** — the stock `Applications/util/init` hits a latent
+   FUZIX bug (`PANIC_INODE_FREED` inside `i_deref`) during its early
+   `open("/dev/tty1")`.  A 80-byte assembly init (`init_minimal`) replaces
+   it during bring-up: it just calls `pause()` forever so PID 1 stays
+   alive without touching the problematic filesystem paths.  The
+   inode-refcount bug is in FUZIX core (not Sprinter-specific) and will
+   be fixed next; the minimal init is a scaffold, not the target.
+
+### Known kernel bugs still to resolve
+
+- **`PANIC_INODE_FREED` in `i_deref`** when the real `/init` opens
+  `/dev/tty1`.  Refcounting in `n_open` / `_open` leaves at least one
+  inode at `c_refs = 0` while a caller still holds a pointer to it.
+  Reproducer: put `Applications/util/init` back as `/init` and boot — the
+  panic fires during the `open("/dev/tty1", O_RDWR|O_NOCTTY)` call.
+
+- Real init's full startup sequence (signal → unlink → close → open → dup
+  → write → load_inittab → execl /bin/sh) depends on this fix.
 
 ### Key fixes that got PID 1 into user space
 
@@ -248,24 +319,27 @@ be restored once PID 1 is stable.
 
 ### Diagnostics still in place
 
-Temporary instrumentation that should be removed once the kernel
-stabilises:
+Temporary instrumentation guarded by `CONFIG_SPRINTER_EARLY_TRACE`.  All
+of it should be removed in the final pass (see task #5):
 
 - `crt0.s` paints the ZX border port (`0xFE`) at five points during
   startup and calls `early_banner` to write `CRT0` to VRAM.
 - `start.c` dumps `udata.u_argn*` before and after `complete_init` and
   reads the just-written `/init` string back via `ugetc` (markers
   `0xCA` / `0xCB`).
-- `syscall_exec16.c` dumps `udata.u_page[0..3]` at `_execve` entry
-  (marker `0xED`), runs a `uputc 0xA5 + ugetc` sentinel probe (markers
-  `0xDE` / `0xDF`), re-stages `/init\0` into user space before
-  `n_open_lock` and verifies the loaded binary via ugetc at a few
-  addresses (markers `0xB3 / 0xB0 / 0xB1 / 0xB2`).
+- `syscall_exec16.c` dumps `udata.u_page[0..3]`, entry, `u_isp` and
+  `u_top` right before `doexec` (marker `0xFE`), then prints
+  `KERNEL OK - userland running` via `kputs` as visible proof.  Also
+  snapshots `hdr` into `_sprinter_last_exec_hdr` and the most recent
+  exec path into `_sprinter_last_exec_path`.
 - `FM_/DIO_/TD_/IDE_/EX_/PROC_TRACE` call sites feed a 512-byte circular
-  trace buffer at `_sprinter_trace_buf` (16-bit index).  `_plt_trace`
-  only writes to memory — it does not touch any border/VID port,
-  because the 0xC0..0xCF range shares decoder bits with the WIN2 /
-  banking registers.
+  trace buffer at `_sprinter_trace_buf` (16-bit index `and 0x01` on the
+  high byte for wrap at 0x200).  `_plt_trace` only writes to memory —
+  it does not touch any border/VID port, because the 0xC0..0xCF range
+  shares decoder bits with the WIN2 / banking registers.
+- Counters: `_sprinter_nmi_count` (NMIs absorbed by `sprinter_nmi_stub`)
+  and `_sprinter_nullh_count` (entries to `null_handler`) are easy
+  sanity checks from a memory dump.
 
 ### Rebuild Command
 
@@ -277,11 +351,18 @@ Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.
 
 ### Next targets
 
-1. Silence / investigate the NMI that fires after `doexec` (Z84C15 WDT,
-   ULA NMI, bus fault).
-2. Re-enable the standard `interrupt_handler` exit path once the IRQ
-   source is understood — ack ULA FRAME, restore `EI; RETI` so the
-   scheduler can actually preempt.
-3. Wire `/dev/console` through `devtty.c` so getty can open a terminal.
-4. Remove the bring-up no-ops and trace markers once PID 1 reaches a
-   login prompt.
+1. **Fix `PANIC_INODE_FREED` in `i_deref`.**  Investigate the refcount
+   accounting in `n_open` / `_open` path.  Once fixed, restore the
+   stock `Applications/util/init` as `/init`, re-enable `/etc/inittab`
+   and `/etc/mtab` in `fuzix-basefs.pkg`.
+2. Wire `/bin/sh` into the inittab respawn so the console drops into a
+   shell once init is healthy again.
+3. Re-enable disk writes (`bdwrite`, `_devide_write_data`) now that the
+   user-memory copy path is trusted.  Run `make clean && make
+   diskimage TARGET=sprinter` afterwards to confirm the image still
+   boots with writes live.
+4. Replace the bring-up `sprinter_bringup_int` with the stock FUZIX
+   `interrupt_handler` exit path (`EI; RETI`) once the ULA FRAME
+   interrupt acknowledge is understood.
+5. Strip the `CONFIG_SPRINTER_EARLY_TRACE` diagnostics (task #5).
+6. FDD (WD1793) + floppy boot path.

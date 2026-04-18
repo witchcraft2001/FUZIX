@@ -76,106 +76,38 @@ arg_t _execve(void)
 	uint8_t exec_name_hi;
 
 	top = ramtop;
-	/* Minimal bring-up fallback: only when exec name pointer is missing. */
-	EX_TRACE(0xE8);
-	EX_TRACE((uint8_t)udata.u_argn);
-	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
-	EX_TRACE((uint8_t)udata.u_ptab->p_pid);
-	if (((uint8_t)udata.u_argn) == 0 &&
-	    ((uint8_t)(((uarg_t)udata.u_argn) >> 8)) == 0) {
-		uptr_t initp = (uptr_t)(PROGLOAD + 256);
-		uptr_t argvp = (uptr_t)PROGLOAD;
-		EX_TRACE(0xEC);
-		uputc('/', (void *)initp);
-		uputc('i', (void *)(initp + 1));
-		uputc('n', (void *)(initp + 2));
-		uputc('i', (void *)(initp + 3));
-		uputc('t', (void *)(initp + 4));
-		uputc(0, (void *)(initp + 5));
-		uputp(initp, (void *)argvp);
-		uputp(0, (void *)(argvp + sizeof(uptr_t)));
-		udata.u_argn = (arg_t)initp;
-		udata.u_argn1 = (arg_t)argvp;
-		udata.u_argn2 = (arg_t)(argvp + sizeof(uptr_t));
-	}
-	EX_TRACE(0xE0);
-	EX_TRACE(0xE7);
-	EX_TRACE((uint8_t)udata.u_argn);
-	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
+
 	exec_name_lo = (uint8_t)udata.u_argn;
 	exec_name_hi = (uint8_t)(((uarg_t)udata.u_argn) >> 8);
 	exec_name_ptr = (uarg_t)udata.u_argn;
 	exec_name = (uint8_t *)exec_name_ptr;
-	#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	EX_TRACE(0xEA);
-	EX_TRACE((uint8_t)udata.u_argn);
-	EX_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
-	#endif
-	#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	EX_TRACE(0xEB);
-	EX_TRACE((uint8_t)(uarg_t)exec_name);
-	EX_TRACE((uint8_t)(((uarg_t)exec_name) >> 8));
-	/* Sprinter bring-up: dump u_page[0..3] so we can confirm the
-	 * user-space mapping that ugetc is about to use points at the
-	 * pages add_argument wrote into, not kernel code / garbage. */
-	EX_TRACE(0xED);
-	EX_TRACE(((uint8_t *)&udata.u_page)[0]);
-	EX_TRACE(((uint8_t *)&udata.u_page)[1]);
-	EX_TRACE(((uint8_t *)&udata.u_page)[2]);
-	EX_TRACE(((uint8_t *)&udata.u_page)[3]);
-	/* Sprinter bring-up write-then-read probe: force a uputc of a
-	 * sentinel byte 0xA5 at exec_name[0] then read it back.  If the
-	 * read does not return 0xA5 the ugetc path is mapping a different
-	 * physical frame than uputc (or one of them is silently bypassing
-	 * the u_page mapping entirely).  After the probe, re-stage
-	 * "/init\0" at exec_name so n_open_lock has a valid string. */
-	if ((uarg_t)exec_name) {
-		uputc(0xA5, (void *)exec_name);
-		EX_TRACE(0xDE);
-		EX_TRACE((uint8_t)ugetc((void *)exec_name));
-		EX_TRACE(0xDF);
-		uputc('/', (void *)exec_name);
-		uputc('i', (void *)((uarg_t)exec_name + 1));
-		uputc('n', (void *)((uarg_t)exec_name + 2));
-		uputc('i', (void *)((uarg_t)exec_name + 3));
-		uputc('t', (void *)((uarg_t)exec_name + 4));
-		uputc(0,   (void *)((uarg_t)exec_name + 5));
-	}
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Copy the exec path into a dedicated 32-byte kernel buffer that
+	 * does NOT get wrapped out of the circular trace.  Also trace the
+	 * first 6 bytes for short-term visibility. */
 	EX_TRACE(0xEF);
-	if ((uarg_t)exec_name) {
-		EX_TRACE((uint8_t)ugetc((void *)exec_name));
-		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 1)));
-		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 2)));
-		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 3)));
-		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 4)));
-		EX_TRACE((uint8_t)ugetc((void *)((uarg_t)exec_name + 5)));
-	} else {
-		EX_TRACE(0);
-		EX_TRACE(0);
-		EX_TRACE(0);
-		EX_TRACE(0);
-		EX_TRACE(0);
-		EX_TRACE(0);
+	{
+		uint_fast8_t i;
+		extern uint8_t sprinter_last_exec_path[32];
+		for (i = 0; i < 31; i++) {
+			uint8_t c = exec_name_ptr
+				? (uint8_t)ugetc((void *)(exec_name_ptr + i))
+				: 0;
+			sprinter_last_exec_path[i] = c;
+			if (i < 6)
+				EX_TRACE(c);
+			if (c == 0)
+				break;
+		}
+		sprinter_last_exec_path[31] = 0;
+		/* Pad trace to always 6 bytes so alignment is predictable. */
+		while (i < 6) {
+			EX_TRACE(0);
+			i++;
+		}
 	}
-	#endif
-	/* Last-chance bring-up fallback for missing exec name. */
-	if ((uarg_t)exec_name == 0) {
-		uptr_t initp = (uptr_t)(PROGLOAD + 256);
-		uptr_t argvp = (uptr_t)PROGLOAD;
-		EX_TRACE(0xEC);
-		uputc('/', (void *)initp);
-		uputc('i', (void *)(initp + 1));
-		uputc('n', (void *)(initp + 2));
-		uputc('i', (void *)(initp + 3));
-		uputc('t', (void *)(initp + 4));
-		uputc(0, (void *)(initp + 5));
-		uputp(initp, (void *)argvp);
-		uputp(0, (void *)(argvp + sizeof(uptr_t)));
-		udata.u_argn = (arg_t)initp;
-		udata.u_argn1 = (arg_t)argvp;
-		udata.u_argn2 = (arg_t)(argvp + sizeof(uptr_t));
-		exec_name = (uint8_t *)initp;
-	}
+#endif
 
 	if (!(ino = n_open_lock(exec_name, NULLINOPTR)))
 	{
@@ -212,24 +144,16 @@ arg_t _execve(void)
 		EX_TRACE((uint8_t)getperm(ino));
 		EX_TRACE((uint8_t)ino->c_node.i_mode);
 		EX_TRACE((uint8_t)(ino->c_node.i_mode >> 8));
-	#ifdef CONFIG_SPRINTER_EARLY_TRACE
-		EX_TRACE(0xE5);
-	#else
 		udata.u_error = EACCES;
 		goto nogood;
-	#endif
 	}
 
 	mflags = fs_tab[ino->c_super].m_flags;
 	if (mflags & MS_NOEXEC) {
 		EX_TRACE(0xE4);
 		EX_TRACE((uint8_t)mflags);
-	#ifdef CONFIG_SPRINTER_EARLY_TRACE
-		EX_TRACE(0xE6);
-	#else
 		udata.u_error = EACCES;
 		goto nogood;
-	#endif
 	}
 
 	setftime(ino, A_TIME);
@@ -240,6 +164,14 @@ arg_t _execve(void)
 	udata.u_sysio = true;
 
 	readi(ino, 0);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern uint8_t sprinter_last_exec_hdr[16];
+		uint_fast8_t i;
+		for (i = 0; i < sizeof(struct exec); i++)
+			sprinter_last_exec_hdr[i] = ((uint8_t *)&hdr)[i];
+	}
+#endif
 	EX_TRACE(0xED);
 	EX_TRACE((uint8_t)udata.u_done);
 	EX_TRACE((uint8_t)(((uarg_t)udata.u_done) >> 8));
@@ -248,17 +180,8 @@ arg_t _execve(void)
 	EX_TRACE(((uint8_t *)&hdr)[2]);
 	EX_TRACE(((uint8_t *)&hdr)[3]);
 	if (udata.u_done != sizeof(struct exec)) {
-	#ifdef CONFIG_SPRINTER_EARLY_TRACE
-		if ((udata.u_done & 0x00FF) == sizeof(struct exec))
-			EX_TRACE(0xFA);
-		else {
-			udata.u_error = ENOEXEC;
-			goto nogood;
-		}
-	#else
 		udata.u_error = ENOEXEC;
 		goto nogood;
-	#endif
 	}
 
 	if (!header_ok(&hdr)) {
@@ -389,10 +312,21 @@ arg_t _execve(void)
 	udata.u_sysio = false;
 
 	/* Should not be possible */
-	if (valaddr_r(udata.u_base, udata.u_count) != udata.u_count)
 	{
-		EX_TRACE(0xFB);
-		goto nogood4;
+		usize_t va;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		extern uint16_t sprinter_last_exec_base;
+		extern uint16_t sprinter_last_exec_count;
+		extern uint16_t sprinter_last_exec_top;
+		sprinter_last_exec_base = (uint16_t)(uarg_t)udata.u_base;
+		sprinter_last_exec_count = (uint16_t)udata.u_count;
+		sprinter_last_exec_top = (uint16_t)udata.u_top;
+#endif
+		va = valaddr_r(udata.u_base, udata.u_count);
+		if (va != udata.u_count) {
+			EX_TRACE(0xFB);
+			goto nogood4;
+		}
 	}
 	readi(ino, 0);
 	if (udata.u_done != bin_size)
@@ -470,6 +404,15 @@ arg_t _execve(void)
 	EX_TRACE((uint8_t)(((uarg_t)udata.u_isp) >> 8));
 	EX_TRACE((uint8_t)top);
 	EX_TRACE((uint8_t)(top >> 8));
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Kernel-side visible proof that execve completed for pid 1.
+	 * Emitted to the console before jumping to user code so we see
+	 * confirmation on the screen regardless of the user program's
+	 * own stdio setup. */
+	if (udata.u_ptab->p_pid == 1)
+		kputs("KERNEL OK - userland running\r\n");
 #endif
 
 	/* Start execution (never returns) */
