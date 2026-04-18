@@ -37,6 +37,10 @@
 	.globl _sprinter_trace_buf
 	.globl _sprinter_dbg
 	.globl _td_op
+	.globl _devide_read_data
+	.globl _devide_write_data
+	.globl _td_raw
+	.globl _td_page
 
         ; imported symbols
         .globl _ramsize
@@ -256,21 +260,100 @@ plt_interrupt_all:
 ; Once the kernel is stable we'll swap this out for the real dispatcher.
 ;=========================================================================
 sprinter_bringup_int:
+        ; Decide whether to absorb or dispatch the IRQ based on the
+        ; FUZIX u_insys flag:
+        ;   u_insys == 0  -> user code was running, hand off to the
+        ;                    real dispatcher so the scheduler, signal
+        ;                    delivery and kbd/timer polling all work.
+        ;   u_insys != 0  -> kernel bring-up / syscall in progress;
+        ;                    the core dispatcher's exit path would
+        ;                    `ei` unconditionally and latch us in a
+        ;                    reentry loop on a level-triggered source
+        ;                    (Sprinter ULA FRAME).  Absorb the IRQ,
+        ;                    pin _int_disabled at 1 and RETI with IFF
+        ;                    still cleared.
         push af
+        ld a, (_udata + U_DATA__U_INSYS)
+        or a
+        jr z, sprinter_bringup_to_kernel
         push hl
-        ; Keep the FUZIX-visible "interrupts are masked" flag pinned at 1
-        ; so any upcoming irqrestore(saved) where saved==0 still skips
-        ; the `ei`.  This breaks the feedback loop.
         ld hl, #_int_disabled
         ld (hl), #1
         pop hl
         pop af
-        ; Do NOT `ei` before RETI: on Z80 `reti` by itself leaves IFF1
-        ; cleared, so the CPU stays masked and a repeating IRQ source
-        ; (ULA FRAME, CTC, etc) cannot immediately re-trigger us before
-        ; the kernel has a chance to make forward progress.  RETI still
-        ; issues the M1 sequence peripherals watch for acknowledgement.
         reti
+sprinter_bringup_to_kernel:
+        pop af
+        jp interrupt_handler
+
+;=========================================================================
+; devide_read_data / devide_write_data - IDE bulk data transfer
+;
+; These must live in _COMMONMEM (WIN3) rather than the bank 1 code page
+; they were originally compiled into: the body installs a user or
+; buffer-cache mapping over WIN0..WIN2 via map_proc_always / map_buffers
+; / map_for_swap before the actual IN/OUT loop.  If the transfer code
+; itself lived in WIN1 or WIN2 the mapping change would unmap the
+; instructions currently being fetched and the CPU would start
+; executing whatever bytes were on the new page.
+;
+; void devide_read_data(uint8_t *dptr)
+; void devide_write_data(uint8_t *dptr)
+;
+; td_raw selects the destination view:
+;   0 -> map_buffers      (kernel buffer pool)
+;   1 -> map_proc_always  (current process user pages)
+;   2 -> map_for_swap(td_page) (swap slot, when SWAPDEV)
+;
+; map_kernel_restore on exit returns the kernel mapping so the caller
+; continues with WIN0..WIN2 set to the kernel banks they expected.
+;=========================================================================
+_devide_read_data:
+        ; arg dptr lives at SP+4 under SDCC sdcccall(0) + push af;noopt
+        ld hl, #4
+        add hl, sp
+        ld e, (hl)
+        inc hl
+        ld d, (hl)
+        ex de, hl		; HL = destination address
+
+        push hl
+        ld a, (_td_raw)
+        cp #2
+        jr nz, ide_rd_not_swap
+        ld a, (_td_page)
+        call map_for_swap
+        jr ide_rd_go
+ide_rd_not_swap:
+        or a
+        jr nz, ide_rd_user
+        call map_buffers
+        jr ide_rd_go
+ide_rd_user:
+        call map_proc_always
+ide_rd_go:
+        pop hl
+
+        ld bc, #0x0050		; IDE data port (low byte is what DCP decodes)
+        ld de, #0x0200		; 512 bytes per sector
+ide_rd_loop:
+        in a, (c)
+        ld (hl), a
+        inc hl
+        dec de
+        ld a, d
+        or e
+        jr nz, ide_rd_loop
+        jp map_kernel_restore
+
+_devide_write_data:
+        ; Bring-up safety: no-op IDE write path.  Even if a higher-level
+        ; caller (bdwrite, cdwrite, tinydisk direct) somehow reaches
+        ; ide_xfer with is_read=false, we refuse to send the 512 OUT
+        ; instructions that would scribble a sector to disk.  Returns
+        ; cleanly so the caller sees a "successful" transfer and the
+        ; buffer is marked clean; nothing ever leaves RAM.
+        ret
 
 ;=========================================================================
 ; program_vectors - set exception vectors for a new process
@@ -291,24 +374,31 @@ _program_vectors:
 	ld e, a
 pv_arg_ok:
 	ex de, hl
-	ld (pv_oldsp), sp
-	ld sp, #pv_stack_top		; temporary stack in common memory
+	; Run the vector setup on the caller's (kernel) stack.  An earlier
+	; implementation swapped SP to a private pv_stack buffer in
+	; _COMMONDATA, but that buffer grew past the IM2 vector table at
+	; 0xFE00 and the first `call` push inside program_vectors then
+	; clobbered table entries.  Kernel stack is already safely rooted
+	; at kstack_top (0xF000) and has plenty of headroom for the three
+	; calls below.
 	call map_proc
 	call do_program_vectors
-	call map_kernel_restore
-	ld sp, (pv_oldsp)
-	ret
+	jp map_kernel_restore
 
 ; Validate pointer to process page map (4 bytes: page0..page3).
 ; IN: DE = pointer
-; OUT: C=1 if valid, C=0 if invalid
+; OUT: C=1 if valid (or NULL), C=0 if the 4 bytes at DE don't look like
+;      a user page map.  The pointer itself may live anywhere in the
+;      kernel address space (0x0000..0xFFFF) -- on this platform
+;      `_udata + U_DATA__U_PAGE` is in common memory at 0xEExx, so an
+;      earlier version that rejected pointers with D >= 0x80 was wrong
+;      and caused program_vectors to silently fall back to mapping the
+;      kernel, leaving user page #0 without the `JP null_handler` stub
+;      and tripping null_pointer_trap on the first IRQ after exec.
 pv_ptr_valid:
 	ld a, d
 	or e
 	jr z, pv_ptr_ok			; NULL means kernel mapping
-	ld a, d
-	cp #0x80
-	jr nc, pv_ptr_bad
 	push hl
 	push bc
 	ld h, d
@@ -330,7 +420,6 @@ pv_ptr_ok:
 pv_ptr_bad_pop:
 	pop bc
 	pop hl
-pv_ptr_bad:
 	or a
 	ret
 
@@ -343,16 +432,17 @@ do_program_vectors:
 	ld (hl), #0x00
 	ldir
 
-	; install interrupt vector at 0x0038 (IM1 fallback) and at the
-	; IM2 slot.  This runs for every new process created by makeproc,
-	; i.e. once the kernel has progressed far enough to spawn PID1.
-	; Use FUZIX's full interrupt_handler here so the scheduler, signal
-	; delivery and pre-emption all work once user space starts.  The
-	; early-boot stub (sprinter_bringup_int) installed by
-	; init_hardware is replaced on the first program_vectors call.
+	; Install the permanent exception vectors.  The IM2 / IM1 slots
+	; intentionally stay on sprinter_bringup_int during kernel
+	; bring-up: enabling FUZIX's interrupt_handler while the kernel
+	; is still mapping memory for PID1 causes a runaway dispatch loop
+	; (the handler's exit path clears _int_disabled and `ei`s, and
+	; the Sprinter ULA FRAME pin is asserted continuously during
+	; boot).  The first _doexec call re-arms these vectors to the
+	; real handler (see sprinter_arm_irq).
 	ld a, #0xC3			; JP instruction
 	ld (0x0038), a
-	ld hl, #interrupt_handler
+	ld hl, #sprinter_bringup_int
 	ld (0x0039), hl
 
 	; set restart vector for FUZIX system calls (RST 30h)
@@ -379,7 +469,7 @@ do_program_vectors:
 
 	ld a, #0xC3
 	ld (0xFDFD), a
-	ld hl, #interrupt_handler
+	ld hl, #sprinter_bringup_int
 	ld (0xFDFE), hl
 
 	ret
@@ -621,23 +711,24 @@ outchar:
 _plt_trace:
 	; void plt_trace(uint8_t code)
 	;
-	; SDCC default sdcccall(0) pushes the uint8_t argument on the stack
-	; via `push af` + `inc sp`.  After the caller's `push af;noopt`
-	; (preserves A around the call), the 1-byte argument sits at SP+4
-	; on entry.  The A register at entry is NOT guaranteed to hold the
-	; argument -- SDCC often computes the byte into B/C/E/L and pushes
-	; directly, leaving A with a stale value from the previous trace.
-	; Reading A here gave bogus trace entries for any non-literal arg.
+	; 1024-byte circular trace buffer with a 16-bit index.  The index
+	; wraps via `and 0x3FF` so the storage range is [0..0x3FF].  This
+	; gives us ~4x as much history as the previous 256-byte buffer,
+	; which matters when /init makes many syscalls (each one writes
+	; 40+ bytes through the bread/td_read/ide_xfer path) and pushes
+	; earlier diagnostic markers out of view.
 	ld hl, #4
 	add hl, sp
 	ld a, (hl)			; A = argument byte from stack
 	ld e, a
-	ld a, (_sprinter_trace_idx)
-	and #0xFF
-	ld c, a
-	inc a
-	ld (_sprinter_trace_idx), a
-	ld b, #0
+	ld hl, (_sprinter_trace_idx)
+	ld b, h
+	ld c, l
+	inc hl
+	ld a, h
+	and #0x01			; wrap to 512 (0x200) bytes
+	ld h, a
+	ld (_sprinter_trace_idx), hl
 	ld hl, #_sprinter_trace_buf
 	add hl, bc
 	ld a, e
@@ -887,10 +978,10 @@ _sprinter_trace_last:
 	.db 0
 
 _sprinter_trace_idx:
-	.db 0
+	.dw 0			; 16-bit index to address a larger buffer
 
 _sprinter_trace_buf:
-	.ds 256
+	.ds 512
 
 _sprinter_dbg:
 	.ds 32

@@ -18,9 +18,17 @@ uint16_t ramtop = PROGTOP;
 
 void plt_idle(void)
 {
-	__asm
-		halt
-	__endasm;
+	/*
+	 * Bring-up idle: poll the keyboard and advance timer ticks in
+	 * software rather than blocking on HALT.  The bring-up IRQ
+	 * dispatcher in sprinter.s absorbs every interrupt (it RETIs
+	 * without EI so IFF1 stays cleared) so a HALT here would never
+	 * wake back up.  Mirror the zx128 pattern of polling the
+	 * tty/timer directly from the idle loop until the kernel IRQ
+	 * path is fully plumbed.
+	 */
+	kbd_poll();
+	timer_interrupt();
 }
 
 uint_fast8_t plt_param(unsigned char *p)
@@ -29,14 +37,21 @@ uint_fast8_t plt_param(unsigned char *p)
 	return 0;
 }
 
+extern void kbd_poll(void);
+
 void plt_interrupt(void)
 {
 	/*
-	 * Fires from the IM2 dispatcher on every masked interrupt the
-	 * CPU accepts.  Kept empty during bring-up so we can verify the
-	 * interrupt plumbing in isolation; once the basic path is stable
-	 * this will call timer_interrupt() and kbd_poll().
+	 * 50 Hz timer tick: advance FUZIX scheduler time and poll the
+	 * PS/2 keyboard.  The bring-up dispatcher in sprinter.s reaches
+	 * here only when u_insys == 0 (user code was running); that is
+	 * sufficient to unblock a process that sleep()ed from user
+	 * space.  For kernel-side waits (plt_idle), the dispatcher
+	 * currently absorbs the IRQ — revisit once the ULA FRAME
+	 * acknowledgement is understood.
 	 */
+	timer_interrupt();
+	kbd_poll();
 }
 
 /*

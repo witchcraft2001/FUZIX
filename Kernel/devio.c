@@ -374,9 +374,27 @@ int bdread(bufptr bp)
 int bdwrite(bufptr bp)
 {
 	uint16_t dev = bp->bf_dev;
+	DIO_TRACE(0x50);
+	DIO_TRACE((uint8_t)dev);
+	DIO_TRACE((uint8_t)(dev >> 8));
+	DIO_TRACE((uint8_t)bp->bf_blk);
+	DIO_TRACE((uint8_t)(bp->bf_blk >> 8));
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Bring-up safety: do NOT let any dirty buffer reach the disk
+	 * until we trust the kernel's state.  Pretend the write
+	 * succeeded so callers treat the buffer as clean and don't
+	 * retry in a tight loop; this prevents wild / corrupted
+	 * buffers (with bad bf_dev or bf_blk) from overwriting the
+	 * MBR, boot sector or filesystem metadata on disk.  The only
+	 * cost is that filesystem updates (atimes, etc.) don't
+	 * persist -- which is what we want while PID 1 is still
+	 * coming up. */
+	return BLKSIZE;
+#else
 	validchk(dev, PANIC_BDW);
 	bdsetup(bp);
 	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 0, 0));
+#endif
 }
 
 int cdread(uint16_t dev, uint_fast8_t flag)

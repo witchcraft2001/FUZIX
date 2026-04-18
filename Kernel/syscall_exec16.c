@@ -453,10 +453,60 @@ arg_t _execve(void)
 	/* Set stack pointer for the program */
 	udata.u_isp = nenvp - 2;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Dump the page map we're about to hand to user space, plus the
+	 * entry point, user SP and top-of-memory so we can tell whether
+	 * pagemap_realloc left WIN0..WIN2 pointing at real user pages
+	 * (e.g. 0x08..0x47) or whether map_proc_2's sanity fallback
+	 * substituted kernel page 0x48.  If a user page shows as 0x48
+	 * the user binary never landed in RAM -- doexec jumps into
+	 * kernel code interpreted as user code, which is what "tttttt"
+	 * garbage on-screen looks like in practice. */
+	EX_TRACE(0xFE);
+	EX_TRACE(((uint8_t *)&udata.u_page)[0]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[1]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[2]);
+	EX_TRACE(((uint8_t *)&udata.u_page)[3]);
+	EX_TRACE((uint8_t)(progload + hdr.a_entry));
+	EX_TRACE((uint8_t)((progload + hdr.a_entry) >> 8));
+	EX_TRACE((uint8_t)udata.u_isp);
+	EX_TRACE((uint8_t)(((uarg_t)udata.u_isp) >> 8));
+	EX_TRACE((uint8_t)top);
+	EX_TRACE((uint8_t)(top >> 8));
+	/* Write a known pattern via uputc and read it back via ugetc.
+	 * If the round-trip fails, user-memory access is broken.  If it
+	 * succeeds, the load path (uputblk -> blktou -> _uput -> __uput
+	 * slow loop) is the culprit. */
+	EX_TRACE(0xB3);
+	uputc(0xAA, (void *)0x0112);
+	uputc(0xBB, (void *)0x0113);
+	uputc(0xCC, (void *)0x0114);
+	uputc(0xDD, (void *)0x0115);
+	EX_TRACE((uint8_t)ugetc((void *)0x0112));
+	EX_TRACE((uint8_t)ugetc((void *)0x0113));
+	EX_TRACE((uint8_t)ugetc((void *)0x0114));
+	EX_TRACE((uint8_t)ugetc((void *)0x0115));
+	EX_TRACE(0xB0);
+	/* Re-read to see if the loader actually wrote anything here. */
+	EX_TRACE((uint8_t)ugetc((void *)0x0110));
+	EX_TRACE((uint8_t)ugetc((void *)0x0111));
+	EX_TRACE((uint8_t)ugetc((void *)0x0116));
+	EX_TRACE((uint8_t)ugetc((void *)0x0117));
+	EX_TRACE(0xB1);
+	EX_TRACE((uint8_t)ugetc((void *)0x35FE));
+	EX_TRACE((uint8_t)ugetc((void *)0x35FF));
+	EX_TRACE((uint8_t)ugetc((void *)0x3600));
+	EX_TRACE((uint8_t)ugetc((void *)0x3601));
+	EX_TRACE(0xB2);
+	EX_TRACE((uint8_t)ugetc((void *)0x47FE));
+	EX_TRACE((uint8_t)ugetc((void *)0x47FF));
+	EX_TRACE((uint8_t)ugetc((void *)0x4800));
+	EX_TRACE((uint8_t)ugetc((void *)0x4801));
+#endif
+
 	/* Start execution (never returns) */
 	udata.u_ptab->p_status = P_RUNNING;
 	doexec(progload + hdr.a_entry);
-	EX_TRACE(0xFE);
 
 	/* tidy up in various failure modes */
 nogood4:

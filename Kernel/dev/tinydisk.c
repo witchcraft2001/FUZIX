@@ -55,6 +55,16 @@ static int td_transfer(uint8_t minor, bool is_read, uint8_t rawflag)
 		if (d_blkoff(BLKSHIFT))
 			return -1;
 		td_page = udata.u_page;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		/* Dump u_page[0..3] so we can tell whether map_proc_always
+		 * is going to set up a real user mapping or fall back to a
+		 * kernel page because u_page is unpopulated. */
+		TD_TRACE(0x40);
+		TD_TRACE(((uint8_t *)&udata.u_page)[0]);
+		TD_TRACE(((uint8_t *)&udata.u_page)[1]);
+		TD_TRACE(((uint8_t *)&udata.u_page)[2]);
+		TD_TRACE(((uint8_t *)&udata.u_page)[3]);
+#endif
 	}
 #if defined(SWAPDEV) || defined(PAGEDEV)
 	else if (rawflag == 2)

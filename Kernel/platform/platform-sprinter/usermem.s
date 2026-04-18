@@ -123,22 +123,30 @@ uputget:
 	ret
 
 ;
-;	_uput() wrapper uses a different stack argument order than _uget().
-;	On entry to __uput (after push ix):
+;	_uput() C signature is _uput(source, user, count), so after
+;	`push ix; ld ix, #0; add ix, sp` (and the SDCC noopt AF save
+;	before the call) the stack layout is:
 ;	 6(ix)  source
-;	 8(ix)  count
-;	10(ix)  destination (user)
+;	 8(ix)  destination (user)
+;	10(ix)  byte count
+;
+;	The previous version loaded BC from 8(ix) and DE from 10(ix)
+;	-- i.e. BC=dst, DE=count -- which swapped the two, so the
+;	fast path's `ldir` treated the destination pointer as a
+;	count and the slow path wrote every source byte to the same
+;	remapped address derived from `count`.  Result: the binary
+;	never actually landed in user RAM.
 ;
 uputget_put:
-	; load BC with the byte count
-	ld c, 8(ix)
-	ld b, 9(ix)
-	; load HL with source address
+	; load BC with the byte count (arg 2)
+	ld c, 10(ix)
+	ld b, 11(ix)
+	; load HL with source address (arg 0)
 	ld l, 6(ix)
 	ld h, 7(ix)
-	; load DE with destination user address
-	ld e, 10(ix)
-	ld d, 11(ix)
+	; load DE with destination user address (arg 1)
+	ld e, 8(ix)
+	ld d, 9(ix)
 	ld a, b
 	or c
 	ret
@@ -245,12 +253,20 @@ uput_slow_loop:
 	push hl
 	push bc
 	push de
-	push af
+	push af			; stash the source byte on the stack
 	call map_proc_save_u
-	pop af
-	call user_map_de
+	; user_map_de trashes A (it recomputes A to the remapped
+	; destination high byte 0x40..0x7F and leaves the same value
+	; in D).  Call it first, THEN restore the source byte into A
+	; so the `ld (hl), a` below writes the right thing.  The
+	; earlier ordering (`pop af` before `call user_map_de`) was
+	; why every user-memory byte landed as (addr_high & 0x3F) | 0x40
+	; -- e.g. 0x76 at 0x3600, 0x41 at 0x0112 -- which parsed as
+	; HALT instructions and jammed /init on entry.
+	call user_map_de	; DE -> remapped dest, WIN1/WIN2 set for user
 	ld h, d
 	ld l, e
+	pop af			; A = source byte
 	ld (hl), a
 	pop de
 	call map_kernel_restore_u

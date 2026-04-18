@@ -21,7 +21,12 @@
 /* Flexible 4x16K banking */
 #define CONFIG_BANK16
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT(x)	1
+/* Disabled during bring-up: the direct path invokes map_proc_always with
+ * the raw udata.u_page mapping.  If PID1's page map is not fully
+ * populated the transfer writes into kernel pages and corrupts the
+ * running kernel.  Force everything through the buffer cache until the
+ * user mapping is trusted. */
+#define CONFIG_LARGE_IO_DIRECT(x)	0
 /*
  * 256 total 16K pages in 4MB RAM.
  * Reserve high RAM pages 0x48-0x4F for kernel (CODE, 3 code banks, common):
