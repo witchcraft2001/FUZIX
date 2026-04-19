@@ -864,8 +864,14 @@ void i_deref(register inoptr ino)
 
     magic(ino);
 
-    if(!ino->c_refs)
+    if(!ino->c_refs) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        kprintf("i_deref0 dev=%x num=%x nlink=%x mode=%x\n",
+            ino->c_dev, ino->c_num,
+            ino->c_node.i_nlink, ino->c_node.i_mode);
+#endif
         panic(PANIC_INODE_FREED);
+    }
 
     if (mode == MODE_R(F_PIPE))
         wakeup((uint8_t *)ino);

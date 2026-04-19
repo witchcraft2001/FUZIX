@@ -93,4 +93,20 @@ void map_init(void)
 	 */
 	if (init_process && pagemap_alloc(init_process) != 0)
 		panic("map_init: no pages");
+	/*
+	 * Seed init's "common" page (p_page[3]) with a full copy of the
+	 * running kernel common page.  init is the first process: it
+	 * never goes through switchin() and nothing else populates the
+	 * page it was handed.  When init forks, fork_copy reads parent's
+	 * page[3] (== uninitialised p_page[3]) and copies garbage into
+	 * the child's top bank, making MPGSEL_3 point at junk after the
+	 * switchin.  Copy the whole 16 KB so udata, kstack and the top
+	 * of common code all survive the propagation through fork.
+	 */
+	if (init_process) {
+		extern void sprinter_seed_common(uint8_t target_page);
+		/* p_page is a uint16_t/uint16_t pair holding 4 page bytes */
+		uint8_t top = ((uint8_t *)&init_process->p_page)[3];
+		sprinter_seed_common(top);
+	}
 }

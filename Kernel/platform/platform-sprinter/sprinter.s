@@ -23,6 +23,7 @@
 	.globl map_for_swap
 	.globl plt_interrupt_all
 	.globl _copy_common
+	.globl _sprinter_seed_common
 	.globl mpgsel_cache
 	.globl top_bank
 	.globl _kernel_pages
@@ -715,6 +716,76 @@ _copy_common:
 	jp map_kernel
 
 ;=========================================================================
+; _sprinter_seed_common - full 16K copy of the running kernel common page
+; (WIN3, currently page 0x4B) into the target page.  Used once at boot
+; to initialise PID1 (init)'s p_page[3] so that the first fork() does
+; not propagate uninitialised bytes as the child's "common" bank.
+;
+; Unlike _copy_common, which only ships 3.5K of high kernel code from
+; 0xF200, this routine copies the entire 0xC000-0xFFFF range so udata,
+; the kernel stack and the common-mem code all survive being ported
+; into the child bank by fork_copy.
+;
+; C prototype: void sprinter_seed_common(uint8_t target_page);
+;=========================================================================
+_sprinter_seed_common:
+	pop bc			; return address
+	pop hl			; (unused)
+	pop de			; target page number (E = page, D = padding)
+	push de
+	push hl
+	push bc
+	; Called from create_init()/map_init() during boot, IRQs are
+	; already off here.  We do NOT ei inside this routine.
+	di			; must stay off through the switch below
+	ld a, e
+	call map_for_swap	; map target page at WIN1 (0x4000-0x7FFF)
+				; A now holds the actual page (target,
+				; or 0x49 if caller passed an invalid
+				; value -- map_for_swap substitutes)
+	push af			; save target across ldir (E is clobbered)
+	; Copy 0xC000-0xFFFF (WIN3, kernel common page 0x4B) into the
+	; target page mapped at WIN1 (0x4000-0x7FFF).  Single 16 KB
+	; ldir - target ends up as an exact byte-for-byte copy of the
+	; live kernel common, including udata, kstack and common-code.
+	ld hl, #0xC000
+	ld de, #0x4000
+	ld bc, #0x4000
+	ldir
+	pop af			; A = target page again
+	; Switch MPGSEL_3 to the target page.  Because target is an
+	; exact copy of what was just at WIN3, SP (which lives in the
+	; 0xFFxx range) still finds identical bytes after the switch:
+	; our return address on stack survives, ret works, caller keeps
+	; going uninterrupted.  IRQs are off (di above), so nothing can
+	; push/pop between the ldir and the switch.
+	;
+	; Why this matters: init is the first process and never goes
+	; through _switchin, which is what otherwise installs a process's
+	; own common page.  Without this switch, MPGSEL_3 stays on the
+	; kernel common (0x4B) while init's u_page[3] records the
+	; just-seeded target page.  When init forks, fork_copy reads
+	; parent's u_page[3] as the source and copies that (stale seed)
+	; into the child -- but the live stack/udata are in 0x4B, not in
+	; the seed page, so the child switches in on corrupt common.
+	; Switching here makes init's u_page[3] and the running
+	; MPGSEL_3 agree, and fork_copy then propagates the live common.
+	;
+	; _kernel_pages[3] is deliberately left at 0x4B: sanitize_kpages
+	; only inspects the array, so it stays a no-op, and map_kernel
+	; never touches MPGSEL_3.  top_bank tracks the real port value.
+	out (MPGSEL_3), a	; switch first; SP still finds identical bytes
+	; We are now running on the target common page.  Both mpgsel_cache
+	; and top_bank live IN common, so writing them here updates the
+	; target page's copy (which is what subsequent code reads once we
+	; are on target).  The old kernel-common copy at 0x4B becomes
+	; orphaned and is never referenced again -- init is the only
+	; process and it now lives on target.
+	ld (mpgsel_cache + 3), a
+	ld (top_bank), a
+	jp map_kernel
+
+;=========================================================================
 ; outchar - output a character for kernel debug messages
 ; Input: A = character
 ;=========================================================================
@@ -743,12 +814,13 @@ outchar:
 _plt_trace:
 	; void plt_trace(uint8_t code)
 	;
-	; 1024-byte circular trace buffer with a 16-bit index.  The index
-	; wraps via `and 0x3FF` so the storage range is [0..0x3FF].  This
-	; gives us ~4x as much history as the previous 256-byte buffer,
-	; which matters when /init makes many syscalls (each one writes
-	; 40+ bytes through the bread/td_read/ide_xfer path) and pushes
-	; earlier diagnostic markers out of view.
+	; 256-byte circular trace buffer with an 8-bit index (stored in
+	; a 16-bit slot for backward compatibility).  The buffer had to
+	; shrink from 512 bytes because the Sprinter IM2 vector table
+	; sits at fixed 0xFE00-0xFEFF: a 512-byte buffer running up from
+	; _COMMONDATA overlapped that range and plt_trace writes silently
+	; corrupted the IM2 handler address, making the next IRQ jump
+	; through garbage.
 	ld hl, #4
 	add hl, sp
 	ld a, (hl)			; A = argument byte from stack
@@ -758,7 +830,7 @@ _plt_trace:
 	ld c, l
 	inc hl
 	ld a, h
-	and #0x01			; wrap to 512 (0x200) bytes
+	and #0x00			; wrap to 256 bytes: high byte always 0
 	ld h, a
 	ld (_sprinter_trace_idx), hl
 	ld hl, #_sprinter_trace_buf
@@ -1034,7 +1106,7 @@ _sprinter_trace_idx:
 	.dw 0			; 16-bit index to address a larger buffer
 
 _sprinter_trace_buf:
-	.ds 512
+	.ds 256
 
 _sprinter_dbg:
 	.ds 32

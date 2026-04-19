@@ -163,7 +163,7 @@ dd if=Images/sprinter/fuzix.img of=/dev/sdX bs=512 conv=fsync
 | `/bin/sh` in filesystem | ✅ Shipped via `V7-sh` package |
 | Disk writes | ⚠️ `bdwrite` / `devide_write_data` no-op'd during bring-up (safety net) |
 | Interrupt dispatcher | ⚠️ Bring-up stub (`sprinter_bringup_int`) — absorbs IRQ when `u_insys=1` |
-| Real `/init` (`Applications/util/init`) | 🔲 Triggers `PANIC_INODE_FREED` in `i_deref` during `open("/dev/tty1")` path |
+| Real `/init` (`Applications/util/init`) | 🟡 Runs past `KERNEL OK - userland running`, then hits `PANIC_INODE_FREED` in `i_deref` on inode dev=1 num=0x32 (directory, mode=0x41ED, nlink=2) |
 | Interactive shell `/bin/sh` | 🔲 Blocked on full init → getty → login flow |
 | FDD (WD1793) | 🔲 Not implemented |
 
@@ -234,24 +234,141 @@ Reached via a sequence of fixes, each of which exposed the next issue:
    path but is kept for safety).  `_sprinter_nullh_count` at 0xFBB0
    tracks every entry so a dump tells us whether the path ever fires.
 
-6. **Minimal `/init`** — the stock `Applications/util/init` hits a latent
-   FUZIX bug (`PANIC_INODE_FREED` inside `i_deref`) during its early
-   `open("/dev/tty1")`.  A 80-byte assembly init (`init_minimal`) replaces
-   it during bring-up: it just calls `pause()` forever so PID 1 stays
-   alive without touching the problematic filesystem paths.  The
-   inode-refcount bug is in FUZIX core (not Sprinter-specific) and will
-   be fixed next; the minimal init is a scaffold, not the target.
+6. **Minimal `/init` scaffold (historical)** — before the common-page
+   fix landed, a minimal 80-byte `init_minimal` that just called
+   `pause()` was used to confirm the user-mode entry path.  Once
+   `sprinter_seed_common` was taught to switch `MPGSEL_3` to init's
+   own common page, the stock `Applications/util/init` was restored in
+   `fuzix-basefs.pkg` and now runs far enough to trip the core
+   refcount bug in `i_deref` (see *Current investigation* below).
+
+7. **Init's own common page** (April 2026) — the last stacked fix on
+   the bring-up path.  Without it, `fork_copy` on the first child
+   propagated a stale snapshot of kernel common into the child and
+   `_switchin` returned into garbage.  See the milestone section below.
+
+### Current investigation (April 2026 — post init-common fix)
+
+Real `/init` (`Applications/util/init`) is restored in `fuzix-basefs.pkg`
+and actually executes.  The boot console shows the full banner, the
+kernel completes mount, prints `Starting /init`, `KERNEL OK - userland
+running`, and init makes progress into filesystem paths.  The next
+halt is:
+
+```
+i_deref0 dev=0001 num=0032 nlink=0002 mode=41ED
+panic: inode freed.
+```
+
+Decoded:
+- `dev=0x0001` — root filesystem (`hda1`, LBA 258+).
+- `num=0x0032` — inode 50.
+- `mode=0x41ED` — directory, `0755` (regular, not a tty or a pipe).
+- `nlink=2` — leaf directory (self + parent link only, no subdirs).
+
+At register dump time: `PC=0xF16A` (kernel common code, `_panic` loop),
+`SP=0xEFB5`, `PG0=0x48` (kernel CODE), `PG1=0x4C` + `PG2=0x4D` (kernel
+CODE3 overlay — a banked syscall target was active), `PG3=0x46` (init's
+own common page).  Banking is clean; the halt is a genuine refcount
+bug.
+
+### Milestone: init's own common page (April 2026)
+
+Previously the first fork from real `/init` corrupted kernel common
+and the system fell into wild bank mapping (`PG0=0xFB`, `PG3=0x08`,
+random bytes at `0xFA00..0xFFFF`).  Root cause: init is the only
+process that never goes through `_switchin`, so its `MPGSEL_3` stayed
+on kernel common (`0x4B`) while its `u_page[3]` pointed at a freshly
+allocated user page.  On `fork()`, `fork_copy` reads parent's
+`u_page[3]` as the source and copies that into the child — but the
+live stack / udata are in `0x4B`, not in the seed page, so the child
+`_switchin` restored garbage into its top bank.
+
+Fix (in `sprinter_seed_common`, `sprinter.s`):
+
+1. Copy the full 16 KB of kernel common (`0xC000..0xFFFF`) into init's
+   allocated common page via `ldir` — target is now a byte-for-byte
+   replica.
+2. Immediately switch `MPGSEL_3` to that target page.  `SP` still
+   lives at `0xFFxx`, target has identical bytes there, so the `ret`
+   through the caller's return address stays valid.  IRQs are off at
+   this point in boot, so nothing can push/pop between the copy and
+   the switch.
+3. Update `mpgsel_cache+3` and `top_bank` **after** the switch so the
+   writes land in the target page (the orphaned `0x4B` copy is never
+   referenced again).
+4. Leave `_kernel_pages[3] = 0x4B` — `sanitize_kpages` checks that
+   array, not the port, so it stays a no-op and `map_kernel` never
+   touches `MPGSEL_3`.
+
+After the fix init runs on its own common, `u_page[3]` matches the
+live `MPGSEL_3`, and `fork_copy` propagates the real kstack / udata
+into children.  The earlier symptoms (corrupt `0xFA71..0xFBBE` common
+code, wild `PG0`) no longer reproduce.
+
+### Hypotheses verified
+
+- **Trace buffer overlapped the IM2 vector table.**  The 512-byte
+  `_sprinter_trace_buf` at `0xFC0C` extended to `0xFE0C`, overwriting
+  the IM2 table at `0xFE00..0xFEFF`.  `plt_trace` wrapped the index
+  with `and #0x01` on the high byte, so writes repeatedly corrupted
+  IRQ vectors and produced wild dispatches.  Fixed by shrinking the
+  buffer to 256 bytes and tightening the wrap mask.
+- **`fork_copy` uses `u_page` as source, not live MPGSEL_3.**  Confirmed
+  by reading `Kernel/platform/platform-sprinter/tricks.s:fork_copy` —
+  iteration 4 does `out (MPGSEL_2), u_page[3]` then `ldir` from WIN2.
+  For every non-init process `u_page[3] == MPGSEL_3` (via `_switchin`);
+  for init they differed by design → corruption on first fork.
+- **`_kernel_pages[3]` stays `0x4B` safely.**  `sanitize_kpages` only
+  inspects the array; `map_kernel` / `map_proc_2` only touch WIN0–2.
+  So overriding the running `MPGSEL_3` without rewriting the array
+  does not trigger a reset.
+- **The earlier `softened i_deref` workaround was hiding corruption,
+  not fixing it.**  Returning from `i_deref` with `c_refs == 0`
+  leaves the inode in an inconsistent state; the panic text we now
+  see (clean halt, valid `PC`) was masked before by cascade faults.
+  Reverted to `panic(PANIC_INODE_FREED)` so real bugs surface
+  immediately.
+
+### Hypotheses still to check
+
+1. **Which syscall path reaches the bad `i_deref`.**  `dev=1, num=50,
+   mode=0755` is a directory.  Suspect paths: `sys_unlink("/etc/mtab")`
+   (init removes the file at startup — ENOENT walks the parent chain),
+   `sys_open("/dev/tty1")` if the `/dev` directory lookup double-derefs
+   the parent, or `umount`/`mount` on the root.  Plan: add a one-shot
+   `TRACE_I_REF`/`TRACE_I_DEREF` print around the inode table so every
+   `++` / `--` on a given `c_num` is logged with the caller.
+2. **`filesys.c:n_open_lock` parent-dir bookkeeping.**  The walker
+   `i_ref`s each intermediate component and `i_deref`s siblings.  If
+   the final component is a directory with `nlink=2`, the early-exit
+   paths might double-deref the parent.  Candidate site:
+   `filesys.c:n_open` around the `.` / `..` short-circuits.
+3. **Whether the panic is reproducible with `/etc/mtab` absent.**  The
+   current `fuzix-basefs.pkg` already comments out `/etc/mtab` so that
+   init's `unlink("/etc/mtab")` takes the ENOENT path.  If the bug
+   moves (different inode num/mode) when we re-enable `mtab`, that
+   isolates the responsible syscall.
+4. **`wr_inode` vs `i_deref` order during write-back.**  Earlier
+   dumps showed `magic()` fires inside `wr_inode` with `caller ≈
+   0x5574`.  Worth reconfirming: does the bad `i_deref` sit on the
+   same code path as `wr_inode`, or is it cleanup (`oft_deref`) from
+   a failed syscall?
+5. **Reference-count damage via buffer cache / blkbuf.**  If `bfree`
+   or `brelse` marks an inode dirty while a caller still holds it,
+   subsequent `i_deref` can drop `c_refs` below the expected floor.
+   Check `devio.c:bread`/`brelse` and `blk512.c` for Sprinter-specific
+   changes that might have broken the core assumption.
+6. **Behaviour under `CONFIG_UFS` vs `CONFIG_LEVEL_2`.**  Confirm that
+   Sprinter's `config.h` matches a platform where `i_deref` is known
+   to be robust (e.g. zxevo, z80retro) — any divergent `CONFIG_*`
+   option around level-2 bookkeeping is a suspect.
 
 ### Known kernel bugs still to resolve
 
-- **`PANIC_INODE_FREED` in `i_deref`** when the real `/init` opens
-  `/dev/tty1`.  Refcounting in `n_open` / `_open` leaves at least one
-  inode at `c_refs = 0` while a caller still holds a pointer to it.
-  Reproducer: put `Applications/util/init` back as `/init` and boot — the
-  panic fires during the `open("/dev/tty1", O_RDWR|O_NOCTTY)` call.
-
-- Real init's full startup sequence (signal → unlink → close → open → dup
-  → write → load_inittab → execl /bin/sh) depends on this fix.
+- **`PANIC_INODE_FREED` in `i_deref`** as described above.
+- Real init's full startup sequence (signal → unlink → close → open →
+  dup → write → load_inittab → execl /bin/sh) depends on this fix.
 
 ### Key fixes that got PID 1 into user space
 
@@ -351,16 +468,18 @@ Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.
 
 ### Next targets
 
-1. **Fix `PANIC_INODE_FREED` in `i_deref`.**  Investigate the refcount
-   accounting in `n_open` / `_open` path.  Once fixed, restore the
-   stock `Applications/util/init` as `/init`, re-enable `/etc/inittab`
-   and `/etc/mtab` in `fuzix-basefs.pkg`.
-2. Wire `/bin/sh` into the inittab respawn so the console drops into a
-   shell once init is healthy again.
-3. Re-enable disk writes (`bdwrite`, `_devide_write_data`) now that the
-   user-memory copy path is trusted.  Run `make clean && make
-   diskimage TARGET=sprinter` afterwards to confirm the image still
-   boots with writes live.
+1. **Find the refcount offender in `i_deref` on `dev=1 num=0x32`.**
+   Add per-`c_num` i_ref/i_deref tracing (guarded by
+   `CONFIG_SPRINTER_EARLY_TRACE`) and replay the real-init boot.
+   Each `++c_refs` and `--c_refs` should record the caller address;
+   diff the log to find the extra `--`.  Do the fix in core FUZIX
+   only if the bug truly cannot be contained in platform glue.
+2. Re-enable `/etc/inittab` (and `/etc/mtab` once `i_deref` is fixed)
+   in `fuzix-basefs.pkg`, then wire `/bin/sh` into the inittab respawn
+   so the console drops into a shell.
+3. Re-enable disk writes (`bdwrite`, `_devide_write_data`) once PID 1
+   is stable.  Run `make clean && make diskimage TARGET=sprinter`
+   afterwards to confirm the image still boots with writes live.
 4. Replace the bring-up `sprinter_bringup_int` with the stock FUZIX
    `interrupt_handler` exit path (`EI; RETI`) once the ULA FRAME
    interrupt acknowledge is understood.
