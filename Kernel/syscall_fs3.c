@@ -73,7 +73,7 @@ arg_t _open(void)
 		ino->c_node.i_mode =
 		    (F_REG | (mode & MODE_MASK & ~udata.u_mask));
 		setftime(ino, A_TIME | M_TIME | C_TIME);
-		wr_inode(ino);
+		WR_INODE(41, ino);
 		perm = getperm(ino);
 
 		/* In the Unix world a creat() of a file with no permissions
@@ -249,7 +249,7 @@ arg_t _link(void)
 
 	/* Update the link count. */
 	++ino->c_node.i_nlink;
-	wr_inode(ino);
+	WR_INODE(42, ino);
 	setftime(ino, C_TIME);
 
 	i_unlock_deref(parent2);
@@ -476,7 +476,7 @@ arg_t _ftruncate(void)
 		f_trunc_blocks(ino, BLOCK(n + BLKSIZE - 1));
 	ino->c_node.i_size = n;
 	setftime(ino, M_TIME | C_TIME);
-	wr_inode(ino);
+	WR_INODE(43, ino);
 	return 0;
 }
 

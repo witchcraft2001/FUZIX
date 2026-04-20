@@ -7,6 +7,7 @@
 extern void plt_trace(uint8_t code);
 #define DIO_TRACE(x) plt_trace(x)
 extern int td_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int td_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
 #else
 #define DIO_TRACE(x) do { } while (0)
 #endif
@@ -260,8 +261,19 @@ bufptr bfind(uint16_t dev, blkno_t blk)
 			/* FIXME: this check is only relevant for non sync stuff
 			   if it's sleeping then this is fine as we'll block here
 			   and sleep until the buffer is unlocked */
-			if (bcheck(bp))
+			if (bcheck(bp)) {
+		#ifdef CONFIG_SPRINTER_EARLY_TRACE
+				/*
+				 * Sprinter bring-up: task-fault recovery paths can strand
+				 * BF_BUSY on cache entries when we kill a faulting task from
+				 * irregular context.  Treat stale busy as recoverable so we
+				 * don't panic with "want busy block" and can continue boot.
+				 */
+				bp->bf_busy = BF_FREE;
+		#else
 				panic(PANIC_WANTBSYB);
+		#endif
+			}
 			block(bp);
 			return bp;
 		}
@@ -379,22 +391,15 @@ int bdwrite(bufptr bp)
 	DIO_TRACE((uint8_t)(dev >> 8));
 	DIO_TRACE((uint8_t)bp->bf_blk);
 	DIO_TRACE((uint8_t)(bp->bf_blk >> 8));
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/* Bring-up safety: do NOT let any dirty buffer reach the disk
-	 * until we trust the kernel's state.  Pretend the write
-	 * succeeded so callers treat the buffer as clean and don't
-	 * retry in a tight loop; this prevents wild / corrupted
-	 * buffers (with bad bf_dev or bf_blk) from overwriting the
-	 * MBR, boot sector or filesystem metadata on disk.  The only
-	 * cost is that filesystem updates (atimes, etc.) don't
-	 * persist -- which is what we want while PID 1 is still
-	 * coming up. */
-	return BLKSIZE;
-#else
-	validchk(dev, PANIC_BDW);
+ 	validchk(dev, PANIC_BDW);
 	bdsetup(bp);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (major(dev) == 0)
+		return td_write(minor(dev), 0, 0);
+#else
 	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 0, 0));
 #endif
+	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 0, 0));
 }
 
 int cdread(uint16_t dev, uint_fast8_t flag)

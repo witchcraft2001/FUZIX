@@ -1,5 +1,11 @@
-APPOTHER = cpuinfo
+APPOTHER = cpuinfo sprinit0
 include Makefile.common
 
 cpuinfo: cpuinfo.o cpuinfo-z80.o
 	$(LINKER) -o $@ $(LINKER_OPT) $(CRT0) $^ $(LINKER_TAIL)
+
+sprinit0: sprinit0.o
+	$(LINKER) -o $@ $^
+
+sprinit0.o: sprinit0.s
+	sdasz80 -plosgff -o $@ $<

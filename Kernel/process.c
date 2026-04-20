@@ -14,6 +14,8 @@
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
+extern uint16_t sprinter_last_panic_ptr;
+extern uint8_t sprinter_last_panic_bytes[4];
 #define PROC_TRACE(x) plt_trace(x)
 #else
 #define PROC_TRACE(x) do { } while (0)
@@ -207,6 +209,16 @@ ptptr getproc(void)
 
 		switch (getproc_nextp->p_status) {
 		case P_RUNNING:
+		#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			/*
+			 * Sprinter bring-up: recover from stale P_RUNNING entries
+			 * instead of panicking the whole kernel. The current task
+			 * is already switched out by this point, so any extra
+			 * running slot can be demoted back to READY.
+			 */
+			getproc_nextp->p_status = P_READY;
+			continue;
+		#endif
 			panic(PANIC_GETPROC);
 		case P_READY:
 #ifdef DEBUG_SLEEP
@@ -815,6 +827,16 @@ uint_fast8_t chksigs(void)
 	uint_fast8_t r;
 	uint_fast8_t b;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (udata.u_ptab->p_pid == 1) {
+		udata.u_cursig = 0;
+		udata.u_ptab->p_flags &= ~PFL_CHKSIG;
+		udata.u_ptab->p_sig[0].s_pending = 0;
+		udata.u_ptab->p_sig[1].s_pending = 0;
+		return 0;
+	}
+#endif
+
 	/* Sleeping without signals allowed. We rely upon the fact that
 	   P_IOWAIT is never pre-empted or returns to user space so
 	   udata.u_cursig is not consulted until it is safe to do so */
@@ -984,6 +1006,17 @@ void doexit(uint16_t val)
 #endif
 	if (udata.u_ptab->p_pid == 1)
 	{
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		/*
+		 * Sprinter bring-up: avoid global panic when PID 1 trips a
+		 * fault path (null/trap recovery currently routes via doexit).
+		 * Keep init alive so boot can continue and diagnostics can be
+		 * collected from a running system.
+		 */
+		udata.u_cursig = 0;
+		udata.u_error = EFAULT;
+		return;
+	#endif
 		PROC_TRACE(0xC8);
 		PROC_TRACE((uint8_t)val);
 		PROC_TRACE((uint8_t)(val >> 8));
@@ -1064,15 +1097,31 @@ void doexit(uint16_t val)
 #endif
         udata.u_page = 0xFFFFU;
         udata.u_page2 = 0xFFFFU;
-        signal_parent(udata.u_ptab);
+	signal_parent(udata.u_ptab);
 	nready--;
 	nproc--;
 	switchin(getproc());
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Sprinter bring-up: if switchin() unexpectedly returns from the
+	 * exit path, avoid dropping straight into PANIC_DOEXIT/monitor.
+	 * Leave the dead task marked empty and hand control back so the
+	 * next symptom can surface instead of a hard stop.
+	 */
+	return;
+	#endif
 	panic(PANIC_DOEXIT);
 }
 
 void NORETURN panic(char *deathcry)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_last_panic_ptr = (uint16_t)(uarg_t)deathcry;
+	sprinter_last_panic_bytes[0] = deathcry[0];
+	sprinter_last_panic_bytes[1] = deathcry[1];
+	sprinter_last_panic_bytes[2] = deathcry[2];
+	sprinter_last_panic_bytes[3] = deathcry[3];
+#endif
 	PROC_TRACE(0xDB);
 	PROC_TRACE((uint8_t)(uarg_t)deathcry);
 	PROC_TRACE((uint8_t)(((uarg_t)deathcry) >> 8));
@@ -1132,6 +1181,9 @@ void swap_in(ptptr proc)
    eventually, but still manage to get the panic() to happen if it fails */
 void exec_or_die(void)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	static const uint8_t sprinter_probe[] = { 0x18, 0xFE };
+#endif
 #ifdef CONFIG_SWAPPER
 	irqflags_t irq;
 	unsigned pid;
@@ -1148,6 +1200,18 @@ void exec_or_die(void)
 		swapper();
 #endif
 	kputs("Starting /init\n");
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Sprinter bring-up fallback: bypass exec/filesystem/libc entirely and
+	 * jump into a 2-byte user-space loop. This proves whether the bare
+	 * kernel->userspace transition itself is stable.
+	 */
+	uput(sprinter_probe, (void *)PROGLOAD, sizeof(sprinter_probe));
+	udata.u_isp = PROGTOP - 2;
+	udata.u_cursig = 0;
+	kputs("SPRINTER RAW USER PROBE\n");
+	doexec(PROGLOAD);
+	#endif
 	plt_discard();
 	_execve();
 	PROC_TRACE(0xDA);

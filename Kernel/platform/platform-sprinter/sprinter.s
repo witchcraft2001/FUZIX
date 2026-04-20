@@ -43,6 +43,59 @@
 	.globl _sprinter_last_exec_base
 	.globl _sprinter_last_exec_count
 	.globl _sprinter_last_exec_top
+	.globl _sprinter_last_exec_entry
+	.globl _sprinter_last_exec_isp
+	.globl _sprinter_last_exec_stack
+	.globl _sprinter_last_ideref_in
+	.globl _sprinter_last_ideref_post
+	.globl _sprinter_last_ideref_wr
+	.globl _sprinter_last_ideref_meta
+	.globl _sprinter_last_wr_ptr
+	.globl _sprinter_last_wr_meta
+	.globl _sprinter_last_wr_site
+	.globl _sprinter_last_newfile_pino
+	.globl _sprinter_last_newfile_nindex_in
+	.globl _sprinter_last_newfile_nindex_prewr
+	.globl _sprinter_last_iopen_dev
+	.globl _sprinter_last_iopen_ino
+	.globl _sprinter_last_iopen_ret
+	.globl _sprinter_last_panic_ptr
+	.globl _sprinter_last_panic_bytes
+	.globl _sprinter_chlink_stage
+	.globl _sprinter_chlink_wd
+	.globl _sprinter_chlink_nindex
+	.globl _sprinter_chlink_done
+	.globl _sprinter_chlink_error
+	.globl _sprinter_ideref_null_count
+	.globl _sprinter_ideref_null_sys
+	.globl _spr_gir
+	.globl _spr_giu
+	.globl _spr_gio
+	.globl _spr_gifr
+	.globl _spr_gifa
+	.globl _spr_giin
+	.globl _spr_gis
+	.globl _spr_gfcnt
+	.globl _spr_gfr
+	.globl _spr_gfu
+	.globl _spr_gfo
+	.globl _spr_gffr
+	.globl _spr_gffa
+	.globl _spr_gfin
+	.globl _spr_gfs
+	.globl _spr_iac_devptr
+	.globl _spr_iac_ninode
+	.globl _spr_iac_tinode
+	.globl _spr_iac_isize
+	.globl _spr_iac_mounted
+	.globl _spr_sys_enter_no
+	.globl _spr_sys_exit_no
+	.globl _spr_sys_exit_err
+	.globl _spr_sys_exit_up0
+	.globl _spr_sys_exit_up1
+	.globl _spr_sys_exit_up2
+	.globl _spr_pg2_clamp_count
+	.globl _spr_pg2_last_raw
 	.globl _td_op
 	.globl _devide_read_data
 	.globl _devide_write_data
@@ -214,6 +267,15 @@ _plt_reboot:
 	inc hl
 	ld a, (hl)
 	ld (_sprinter_dbg + 27), a
+	ld hl, (_sprinter_last_panic_ptr)
+	ld a, h
+	or l
+	jr nz, plt_monitor_capture
+	; Bring-up: if monitor was not entered from panic(), do not hard
+	; stop here. Return so the next failure can surface.
+	ret
+
+plt_monitor_capture:
 	ld hl, #0x0155
 	ld de, #_sprinter_dbg
 	ld bc, #0x000E
@@ -267,31 +329,16 @@ plt_interrupt_all:
 ; Once the kernel is stable we'll swap this out for the real dispatcher.
 ;=========================================================================
 sprinter_bringup_int:
-        ; Decide whether to absorb or dispatch the IRQ based on the
-        ; FUZIX u_insys flag:
-        ;   u_insys == 0  -> user code was running, hand off to the
-        ;                    real dispatcher so the scheduler, signal
-        ;                    delivery and kbd/timer polling all work.
-        ;   u_insys != 0  -> kernel bring-up / syscall in progress;
-        ;                    the core dispatcher's exit path would
-        ;                    `ei` unconditionally and latch us in a
-        ;                    reentry loop on a level-triggered source
-        ;                    (Sprinter ULA FRAME).  Absorb the IRQ,
-        ;                    pin _int_disabled at 1 and RETI with IFF
-        ;                    still cleared.
-        push af
-        ld a, (_udata + U_DATA__U_INSYS)
-        or a
-        jr z, sprinter_bringup_to_kernel
-        push hl
-        ld hl, #_int_disabled
-        ld (hl), #1
-        pop hl
-        pop af
-        reti
-sprinter_bringup_to_kernel:
-        pop af
-        jp interrupt_handler
+	; Bring-up safety mode: absorb all IM2 IRQs unconditionally.
+	; We still mark interrupts as disabled in common state so any code
+	; sampling _int_disabled stays consistent with the hardware IFF1=0.
+	push af
+	push hl
+	ld hl, #_int_disabled
+	ld (hl), #1
+	pop hl
+	pop af
+	reti
 
 ;=========================================================================
 ; sprinter_nmi_stub - absorb NMI without printing / panicking.
@@ -375,13 +422,42 @@ ide_rd_loop:
         jp map_kernel_restore
 
 _devide_write_data:
-        ; Bring-up safety: no-op IDE write path.  Even if a higher-level
-        ; caller (bdwrite, cdwrite, tinydisk direct) somehow reaches
-        ; ide_xfer with is_read=false, we refuse to send the 512 OUT
-        ; instructions that would scribble a sector to disk.  Returns
-        ; cleanly so the caller sees a "successful" transfer and the
-        ; buffer is marked clean; nothing ever leaves RAM.
-        ret
+	; arg dptr lives at SP+4 under SDCC sdcccall(0) + push af;noopt
+	ld hl, #4
+	add hl, sp
+	ld e, (hl)
+	inc hl
+	ld d, (hl)
+	ex de, hl		; HL = source address
+
+	push hl
+	ld a, (_td_raw)
+	cp #2
+	jr nz, ide_wr_not_swap
+	ld a, (_td_page)
+	call map_for_swap
+	jr ide_wr_go
+ide_wr_not_swap:
+	or a
+	jr nz, ide_wr_user
+	call map_buffers
+	jr ide_wr_go
+ide_wr_user:
+	call map_proc_always
+ide_wr_go:
+	pop hl
+
+	ld bc, #0x0050		; IDE data port (low byte is what DCP decodes)
+	ld de, #0x0200		; 512 bytes per sector
+ide_wr_loop:
+	ld a, (hl)
+	out (c), a
+	inc hl
+	dec de
+	ld a, d
+	or e
+	jr nz, ide_wr_loop
+	jp map_kernel_restore
 
 ;=========================================================================
 ; program_vectors - set exception vectors for a new process
@@ -453,12 +529,10 @@ pv_ptr_bad_pop:
 
 
 do_program_vectors:
-	; write zeroes across all vectors
-	ld hl, #0
-	ld de, #1
-	ld bc, #0x007f
-	ld (hl), #0x00
-	ldir
+	; Sprinter bring-up: do not blank the whole low 0x80 bytes.
+	; Current user binaries make real use of low addresses, and wiping
+	; 0x0000..0x007F destroys startup code/data before first userspace
+	; instructions run. Only patch the required vector slots.
 
 	; Install the permanent exception vectors.  The IM2 / IM1 slots
 	; intentionally stay on sprinter_bringup_int during kernel
@@ -558,7 +632,7 @@ _sprinter_force_bank1:
 	ld a, c
 	out (MPGSEL_1), a
 	ld a, b
-	out (MPGSEL_2), a
+	call set_mpgsel2_safe
 	ret
 
 ;=========================================================================
@@ -572,10 +646,10 @@ map_proc_2:
 	ld a, (hl)			; page for bank #0
 	cp #0x08
 	jr c, map_proc_2_b0_bad
-	cp #0x80
+	cp #0x50
 	jr c, map_proc_2_b0_ok
 map_proc_2_b0_bad:
-	ld a, #0x48
+	ld a, #0x08
 map_proc_2_b0_ok:
 	ld (mpgsel_cache), a
 	out (MPGSEL_0), a		; set bank #0
@@ -583,10 +657,10 @@ map_proc_2_b0_ok:
 	ld a, (hl)			; page for bank #1
 	cp #0x08
 	jr c, map_proc_2_b1_bad
-	cp #0x80
+	cp #0x50
 	jr c, map_proc_2_b1_ok
 map_proc_2_b1_bad:
-	ld a, #0x49
+	ld a, #0x09
 map_proc_2_b1_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a		; set bank #1
@@ -594,13 +668,12 @@ map_proc_2_b1_ok:
 	ld a, (hl)			; page for bank #2
 	cp #0x08
 	jr c, map_proc_2_b2_bad
-	cp #0x80
+	cp #0x50
 	jr c, map_proc_2_b2_ok
 map_proc_2_b2_bad:
-	ld a, #0x4A
+	ld a, #0x0A
 map_proc_2_b2_ok:
-	ld (mpgsel_cache + 2), a
-	out (MPGSEL_2), a		; set bank #2
+	call set_mpgsel2_safe		; set bank #2
 	pop af
 	pop de
 	ret
@@ -610,15 +683,16 @@ sanitize_kpages:
 	cp #0x48
 	jr nz, sanitize_kpages_bad
 	ld a, (_kernel_pages + 1)
-	cp #0x08
-	jr c, sanitize_kpages_bad
-	cp #0x80
-	jr nc, sanitize_kpages_bad
+	ld c, a
 	ld a, (_kernel_pages + 2)
-	cp #0x08
-	jr c, sanitize_kpages_bad
-	cp #0x80
-	jr nc, sanitize_kpages_bad
+	ld b, a
+	call sanitize_bc_map
+	ld a, c
+	ld (_kernel_pages + 1), a
+	ld (mpgsel_cache + 1), a
+	ld a, b
+	ld (_kernel_pages + 2), a
+	ld (mpgsel_cache + 2), a
 	ld a, (_kernel_pages + 3)
 	cp #0x4B
 	jr nz, sanitize_kpages_bad
@@ -688,7 +762,7 @@ map_kernel_restore_u:
 map_for_swap:
 	cp #0x08
 	jr c, map_for_swap_bad
-	cp #0x80
+	cp #0x50
 	jr c, map_for_swap_ok
 map_for_swap_bad:
 	ld a, #0x49
@@ -812,32 +886,8 @@ outchar:
         ret
 
 _plt_trace:
-	; void plt_trace(uint8_t code)
-	;
-	; 256-byte circular trace buffer with an 8-bit index (stored in
-	; a 16-bit slot for backward compatibility).  The buffer had to
-	; shrink from 512 bytes because the Sprinter IM2 vector table
-	; sits at fixed 0xFE00-0xFEFF: a 512-byte buffer running up from
-	; _COMMONDATA overlapped that range and plt_trace writes silently
-	; corrupted the IM2 handler address, making the next IRQ jump
-	; through garbage.
-	ld hl, #4
-	add hl, sp
-	ld a, (hl)			; A = argument byte from stack
-	ld e, a
-	ld hl, (_sprinter_trace_idx)
-	ld b, h
-	ld c, l
-	inc hl
-	ld a, h
-	and #0x00			; wrap to 256 bytes: high byte always 0
-	ld h, a
-	ld (_sprinter_trace_idx), hl
-	ld hl, #_sprinter_trace_buf
-	add hl, bc
-	ld a, e
-	ld (hl), a
-	ld (_sprinter_trace_last), a
+	; Temporary: disable byte trace writes while chasing early
+	; userland livelock/corruption. The call graph remains intact.
 	ret
 
 _tmpout:
@@ -898,7 +948,7 @@ bank0:
 	ld a, c
 	out (MPGSEL_1), a
 	inc a
-	out (MPGSEL_2), a
+	call set_mpgsel2_safe
 	ex de, hl
 	ld a, b
 	cp #BANK1
@@ -914,7 +964,7 @@ banksetbc:
 	ld a, c
 	out (MPGSEL_1), a
 	ld a, b
-	out (MPGSEL_2), a
+	call set_mpgsel2_safe
 	ret
 retbank1:
 	call callhl
@@ -1010,7 +1060,7 @@ stub_call:
 	ld a, c
 	out (MPGSEL_1), a
 	inc a
-	out (MPGSEL_2), a
+	call set_mpgsel2_safe
 	ex de, hl
 	ld a, b
 	cp #BANK1
@@ -1030,7 +1080,7 @@ stub_ret:
 	ld a, c
 	out (MPGSEL_1), a
 	ld a, b
-	out (MPGSEL_2), a
+	call set_mpgsel2_safe
 	pop bc
 	push bc
 	push bc
@@ -1044,18 +1094,49 @@ callhl:	jp (hl)
 
 sanitize_bc_map:
 	ld a, c
-	cp #0x08
-	jr c, sanitize_bc_default
-	cp #0x80
-	jr nc, sanitize_bc_default
+	cp #BANK1
+	jr z, sanitize_bc_b1
+	cp #BANK2
+	jr z, sanitize_bc_b2
+	cp #BANK3
+	jr z, sanitize_bc_b3
+	jr sanitize_bc_default
+sanitize_bc_b1:
 	ld a, b
-	cp #0x08
-	jr c, sanitize_bc_default
-	cp #0x80
-	jr nc, sanitize_bc_default
-	ret
+	cp #0x4A
+	jr z, sanitize_bc_ok
+	jr sanitize_bc_default
+sanitize_bc_b2:
+	ld a, b
+	cp #0x4D
+	jr z, sanitize_bc_ok
+	jr sanitize_bc_default
+sanitize_bc_b3:
+	ld a, b
+	cp #0x4F
+	jr z, sanitize_bc_ok
 sanitize_bc_default:
 	ld bc, #MAP_BANK1
+	ret
+sanitize_bc_ok:
+	ret
+
+set_mpgsel2_safe:
+	ld (_spr_pg2_last_raw), a
+	cp #0x50
+	jr c, set_mpgsel2_ok
+	push hl
+	ld hl, #_spr_pg2_clamp_count
+	inc (hl)
+	jr nz, set_mpgsel2_sat
+	inc hl
+	inc (hl)
+set_mpgsel2_sat:
+	pop hl
+	ld a, #0x4A
+set_mpgsel2_ok:
+	ld (mpgsel_cache + 2), a
+	out (MPGSEL_2), a
 	ret
 
 	.area _COMMONDATA
@@ -1102,6 +1183,165 @@ _sprinter_last_exec_count:
 _sprinter_last_exec_top:
 	.dw 0			; snapshot of udata.u_top before valaddr_r check
 
+_sprinter_last_exec_entry:
+	.ds 16			; 16 bytes read back from progload + a_entry
+
+_sprinter_last_exec_isp:
+	.dw 0			; user SP handed to doexec()
+
+_sprinter_last_exec_stack:
+	.ds 16			; 16 bytes read back from user stack at u_isp
+
+_sprinter_last_ideref_in:
+	.dw 0			; inode pointer on i_deref entry
+
+_sprinter_last_ideref_post:
+	.dw 0			; inode pointer after --c_refs path
+
+_sprinter_last_ideref_wr:
+	.dw 0			; inode pointer right before wr_inode call
+
+_sprinter_last_ideref_meta:
+	.dw 0			; low=u_callno high=u_insys snapshot
+
+_sprinter_last_wr_ptr:
+	.dw 0			; pointer passed to WR_INODE wrapper
+
+_sprinter_last_wr_meta:
+	.dw 0			; low=u_callno high=u_insys at WR_INODE
+
+_sprinter_last_wr_site:
+	.db 0			; WR_INODE call site id
+
+_sprinter_last_newfile_pino:
+	.dw 0			; parent inode pointer seen by newfile()
+
+_sprinter_last_newfile_nindex_in:
+	.dw 0			; nindex pointer returned by i_open in newfile()
+
+_sprinter_last_newfile_nindex_prewr:
+	.dw 0			; nindex pointer just before WR_INODE(1,...)
+
+_sprinter_last_iopen_dev:
+	.dw 0			; last i_open(dev, ino) dev argument
+
+_sprinter_last_iopen_ino:
+	.dw 0			; last i_open(dev, ino) ino argument
+
+_sprinter_last_iopen_ret:
+	.dw 0			; last i_open return pointer
+
+_sprinter_last_panic_ptr:
+	.dw 0			; last panic() deathcry pointer
+
+_sprinter_last_panic_bytes:
+	.ds 4			; first 4 bytes at deathcry pointer
+
+_sprinter_chlink_stage:
+	.db 0			; ch_link progress marker
+
+_sprinter_chlink_wd:
+	.dw 0			; ch_link wd pointer
+
+_sprinter_chlink_nindex:
+	.dw 0			; ch_link nindex pointer
+
+_sprinter_chlink_done:
+	.dw 0			; last u_done observed in ch_link
+
+_sprinter_chlink_error:
+	.dw 0			; last u_error observed in ch_link
+
+_sprinter_ideref_null_count:
+	.dw 0			; number of i_deref(NULL) calls
+
+_sprinter_ideref_null_sys:
+	.dw 0			; low=u_callno high=u_insys for last NULL deref
+
+_spr_gir:
+	.db 0			; 0=ok 1=bad oft index 2=bad of_tab inode ptr
+
+_spr_giu:
+	.db 0			; getinode() fd argument
+
+_spr_gio:
+	.db 0			; u_files[uindex] snapshot
+
+_spr_gifr:
+	.db 0			; of_tab[oftindex].o_refs snapshot
+
+_spr_gifa:
+	.db 0			; of_tab[oftindex].o_access snapshot
+
+_spr_giin:
+	.dw 0			; of_tab[oftindex].o_inode snapshot
+
+_spr_gis:
+	.dw 0			; low=u_callno high=u_insys in getinode
+
+_spr_gfcnt:
+	.dw 0			; count of getinode() validation failures
+
+_spr_gfr:
+	.db 0			; last failing reason (1 bad oft index, 2 bad inode ptr)
+
+_spr_gfu:
+	.db 0			; failing fd/uindex
+
+_spr_gfo:
+	.db 0			; failing u_files[uindex]
+
+_spr_gffr:
+	.db 0			; failing of_tab[oft].o_refs
+
+_spr_gffa:
+	.db 0			; failing of_tab[oft].o_access
+
+_spr_gfin:
+	.dw 0			; failing of_tab[oft].o_inode
+
+_spr_gfs:
+	.dw 0			; syscall context for failing getinode
+
+_spr_iac_devptr:
+	.dw 0			; i_alloc() dev pointer at corrupt path
+
+_spr_iac_ninode:
+	.db 0			; i_alloc() s_ninode snapshot
+
+_spr_iac_tinode:
+	.dw 0			; i_alloc() s_tinode snapshot
+
+_spr_iac_isize:
+	.dw 0			; i_alloc() s_isize snapshot
+
+_spr_iac_mounted:
+	.db 0			; i_alloc() s_mounted snapshot
+
+_spr_sys_enter_no:
+	.db 0			; last syscall number seen at unix_syscall_entry
+
+_spr_sys_exit_no:
+	.db 0			; last syscall number seen after _unix_syscall
+
+_spr_sys_exit_err:
+	.dw 0			; last u_error snapshot after _unix_syscall
+
+_spr_sys_exit_up0:
+	.db 0			; u_page[0] seen after _unix_syscall
+
+_spr_sys_exit_up1:
+	.db 0			; u_page[1] seen after _unix_syscall
+
+_spr_sys_exit_up2:
+	.db 0			; u_page[2] seen after _unix_syscall
+
+_spr_pg2_clamp_count:
+	.dw 0			; count of forced MPGSEL_2 clamps
+
+_spr_pg2_last_raw:
+	.db 0			; raw MPGSEL_2 value before clamp
+
 _sprinter_trace_idx:
 	.dw 0			; 16-bit index to address a larger buffer
 
@@ -1110,10 +1350,3 @@ _sprinter_trace_buf:
 
 _sprinter_dbg:
 	.ds 32
-
-pv_oldsp:
-	.dw 0
-
-pv_stack:
-	.ds 256
-pv_stack_top:

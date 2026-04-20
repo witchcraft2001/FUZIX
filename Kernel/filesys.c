@@ -6,8 +6,85 @@
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define FM_TRACE(x) plt_trace(x)
+extern uint16_t sprinter_last_ideref_in;
+extern uint16_t sprinter_last_ideref_post;
+extern uint16_t sprinter_last_ideref_wr;
+extern uint16_t sprinter_last_ideref_meta;
+extern uint16_t sprinter_last_wr_ptr;
+extern uint16_t sprinter_last_wr_meta;
+extern uint8_t sprinter_last_wr_site;
+extern uint16_t sprinter_last_newfile_pino;
+extern uint16_t sprinter_last_newfile_nindex_in;
+extern uint16_t sprinter_last_newfile_nindex_prewr;
+extern uint16_t sprinter_last_iopen_dev;
+extern uint16_t sprinter_last_iopen_ino;
+extern uint16_t sprinter_last_iopen_ret;
+extern uint8_t sprinter_chlink_stage;
+extern uint16_t sprinter_chlink_wd;
+extern uint16_t sprinter_chlink_nindex;
+extern uint16_t sprinter_chlink_done;
+extern uint16_t sprinter_chlink_error;
+extern uint16_t sprinter_ideref_null_count;
+extern uint16_t sprinter_ideref_null_sys;
+extern uint16_t spr_gfcnt;
+extern uint8_t spr_gfr;
+extern uint8_t spr_gfu;
+extern uint8_t spr_gfo;
+extern uint8_t spr_gffr;
+extern uint8_t spr_gffa;
+extern uint16_t spr_gfin;
+extern uint16_t spr_gfs;
+extern uint16_t spr_iac_devptr;
+extern uint16_t spr_iac_tinode;
+extern uint16_t spr_iac_isize;
+extern uint8_t spr_iac_ninode;
+extern uint8_t spr_iac_mounted;
+
+#define SPRINTER_TRACE_INODE_DEV 0x0001
+#define SPRINTER_TRACE_INODE_NUM 0x0032
+
+static uint16_t sprinter_magic_site;
+
+#define MAGIC_CHECK(site, ino) do { \
+    sprinter_magic_site = (site); \
+    magic(ino); \
+} while (0)
+
+static bool sprinter_trace_inode_match(inoptr ino)
+{
+    return ino && ino->c_dev == SPRINTER_TRACE_INODE_DEV &&
+        ino->c_num == SPRINTER_TRACE_INODE_NUM;
+}
+
+static void sprinter_trace_inode_ref(char op, inoptr ino, uint_fast8_t before,
+    uint16_t site)
+{
+    uint16_t pid = 0;
+
+    if (!sprinter_trace_inode_match(ino))
+        return;
+    if (udata.u_ptab)
+        pid = udata.u_ptab->p_pid;
+    kprintf("I%c dev=%x num=%x refs=%x>%x nlink=%x mode=%x pid=%x sys=%x in=%x at=%x\n",
+        op, ino->c_dev, ino->c_num, before, ino->c_refs,
+        ino->c_node.i_nlink, ino->c_node.i_mode,
+        pid, udata.u_callno, udata.u_insys, site);
+}
+
 #else
 #define FM_TRACE(x) do { } while (0)
+#define MAGIC_CHECK(site, ino) magic(ino)
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+void sprinter_wr_inode(inoptr ino, uint8_t site)
+{
+    sprinter_last_wr_ptr = (uint16_t)(uarg_t)ino;
+    sprinter_last_wr_site = site;
+    sprinter_last_wr_meta = (uint16_t)udata.u_callno |
+        ((uint16_t)udata.u_insys << 8);
+    wr_inode(ino);
+}
 #endif
 
 /*
@@ -85,7 +162,7 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
         /* ninode is the inode we are walking from at this point and wd
            the parent. They may be the same. We hold one reference to each */
         if(ninode)
-            magic(ninode);
+            MAGIC_CHECK(1, ninode);
 
         /* cheap way to spot rename inside yourself */
         if (udata.u_rename == ninode)
@@ -275,6 +352,12 @@ inoptr i_open(register uint16_t dev, uint16_t ino)
     struct mount *m;
     bool isnew = false;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_iopen_dev = dev;
+    sprinter_last_iopen_ino = ino;
+    sprinter_last_iopen_ret = 0;
+#endif
+
     validchk(dev, PANIC_IOPEN);
 
     if(!ino){        /* ino==0 means we want a new one */
@@ -329,10 +412,16 @@ found:
             goto badino;
     }
     nindex->c_refs++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_iopen_ret = (uint16_t)(uarg_t)nindex;
+#endif
     return nindex;
 
 badino:
     kputs("i_open: bad disk inode\n");
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_iopen_ret = 0;
+#endif
     return NULLINODE;
 }
 
@@ -374,6 +463,14 @@ bool ch_link(register inoptr wd, uint8_t *oldname, uint8_t *newname, inoptr nind
     struct direct curentry;
     register int i;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_chlink_stage = 1;
+    sprinter_chlink_wd = (uint16_t)(uarg_t)wd;
+    sprinter_chlink_nindex = (uint16_t)(uarg_t)nindex;
+    sprinter_chlink_done = 0;
+    sprinter_chlink_error = 0;
+#endif
+
     i_islocked(wd);
 
     if (wd->c_flags & CRDONLY) {
@@ -402,12 +499,24 @@ bool ch_link(register inoptr wd, uint8_t *oldname, uint8_t *newname, inoptr nind
         udata.u_count = DIR_LEN;
         udata.u_base  =(uint8_t *)&curentry;
         udata.u_sysio = true;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_chlink_stage = 2;
+#endif
         readi(wd, 0);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_chlink_stage = 3;
+        sprinter_chlink_done = (uint16_t)udata.u_done;
+        sprinter_chlink_error = (uint16_t)udata.u_error;
+#endif
 
         /* Read until EOF or name is found.  readi() advances udata.u_offset */
         if(udata.u_done == 0 || namecomp(oldname, curentry.d_name))
             break;
     }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_chlink_stage = 4;
+#endif
 
     if(udata.u_done == 0 && *oldname) {
         udata.u_error = ENOENT;
@@ -435,10 +544,22 @@ bool ch_link(register inoptr wd, uint8_t *oldname, uint8_t *newname, inoptr nind
     udata.u_count = DIR_LEN;
     udata.u_base  = (unsigned char*)&curentry;
     udata.u_sysio = true;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_chlink_stage = 5;
+#endif
     writei(wd, 0);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_chlink_stage = 6;
+    sprinter_chlink_done = (uint16_t)udata.u_done;
+    sprinter_chlink_error = (uint16_t)udata.u_error;
+#endif
 
-    if(udata.u_error)
+    if(udata.u_error) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_chlink_stage = 8;
+#endif
         return false;
+    }
 
     setftime(wd, A_TIME|M_TIME|C_TIME);     /* Sets CDIRTY */
 
@@ -446,6 +567,9 @@ bool ch_link(register inoptr wd, uint8_t *oldname, uint8_t *newname, inoptr nind
     if(BLKOFF(wd->c_node.i_size))
         wd->c_node.i_size += BLKSIZE - BLKOFF(wd->c_node.i_size);
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_chlink_stage = 7;
+#endif
     return true; // success
 }
 
@@ -515,8 +639,13 @@ inoptr newfile(register inoptr pino, uint8_t *name)
         goto nogood;
     }
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_newfile_pino = (uint16_t)(uarg_t)pino;
+    sprinter_last_newfile_nindex_in = (uint16_t)(uarg_t)nindex;
+#endif
+
     i_lock(pino);	/* Lock in tree order */
-    i_lock(ino);
+    i_lock(nindex);
     /* This does not implement BSD style "sticky" groups */
     nindex->c_node.i_uid = udata.u_euid;
     nindex->c_node.i_gid = udata.u_egid;
@@ -527,7 +656,10 @@ inoptr newfile(register inoptr pino, uint8_t *name)
     for (j = 0; j < 20; j++) {
         nindex->c_node.i_addr[j] = 0;
     }
-    wr_inode(nindex);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_newfile_nindex_prewr = (uint16_t)(uarg_t)nindex;
+#endif
+    WR_INODE(1, nindex);
     if (!ch_link(pino, (uint8_t *)"", name, nindex)) {
         i_deref(nindex);
 	/* ch_link sets udata.u_error */
@@ -598,8 +730,15 @@ uint16_t i_alloc(uint16_t devno)
 
 tryagain:
     if(dev->s_ninode) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        if(!(dev->s_tinode)) {
+            dev->s_ninode = 0;
+            goto tryagain;
+        }
+#else
         if(!(dev->s_tinode))
             goto corrupt;
+#endif
         ino = dev->s_inode[--dev->s_ninode];
         if(ino < 2 || ino >=(dev->s_isize-2)*8)
             goto corrupt;
@@ -629,8 +768,10 @@ tryagain:
 
 done:
     if(!k) {
+#ifndef CONFIG_SPRINTER_EARLY_TRACE
         if(dev->s_tinode)
             goto corrupt;
+#endif
         udata.u_error = ENOSPC;
         return(0);
     }
@@ -638,6 +779,19 @@ done:
     goto tryagain;
 
 corrupt:
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    spr_iac_devptr = (uint16_t)(uarg_t)dev;
+    spr_iac_ninode = dev->s_ninode;
+    spr_iac_tinode = dev->s_tinode;
+    spr_iac_isize = dev->s_isize;
+    spr_iac_mounted = dev->s_mounted;
+    if (dev->s_isize > 2 && dev->s_isize < 4096) {
+        dev->s_ninode = 0;
+        if (dev->s_tinode == 0)
+            dev->s_tinode = 1;
+        goto tryagain;
+    }
+#endif
     kputs("i_alloc: corrupt superblock\n");
     dev->s_mounted = 1;
     udata.u_error = ENOSPC;
@@ -860,15 +1014,36 @@ int_fast8_t uf_alloc(void)
 
 void i_deref(register inoptr ino)
 {
-    uint_fast8_t mode = getmode(ino);
+    uint_fast8_t mode;
 
-    magic(ino);
+    if (!ino) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_ideref_null_count++;
+        sprinter_ideref_null_sys = (uint16_t)udata.u_callno |
+            ((uint16_t)udata.u_insys << 8);
+#endif
+        return;
+    }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_ideref_in = (uint16_t)(uarg_t)ino;
+    sprinter_last_ideref_meta = (uint16_t)udata.u_callno |
+        ((uint16_t)udata.u_insys << 8);
+#endif
+
+    mode = getmode(ino);
+    MAGIC_CHECK(2, ino);
 
     if(!ino->c_refs) {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-        kprintf("i_deref0 dev=%x num=%x nlink=%x mode=%x\n",
+        uint16_t pid = 0;
+
+        if (udata.u_ptab)
+            pid = udata.u_ptab->p_pid;
+        kprintf("i_deref0 dev=%x num=%x nlink=%x mode=%x pid=%x sys=%x in=%x\n",
             ino->c_dev, ino->c_num,
-            ino->c_node.i_nlink, ino->c_node.i_mode);
+            ino->c_node.i_nlink, ino->c_node.i_mode,
+            pid, udata.u_callno, udata.u_insys);
 #endif
         panic(PANIC_INODE_FREED);
     }
@@ -879,22 +1054,31 @@ void i_deref(register inoptr ino)
     /* If the inode has no links and no refs, it must have
        its blocks freed. */
 
-    if(!(--ino->c_refs || ino->c_node.i_nlink))
+    {
+        if(!(--ino->c_refs || ino->c_node.i_nlink))
         /*
            SN (mcy)
            */
-        if (mode == MODE_R(F_REG) || mode == MODE_R(F_DIR) || mode == MODE_R(F_PIPE))
-            f_trunc(ino);
+            if (mode == MODE_R(F_REG) || mode == MODE_R(F_DIR) || mode == MODE_R(F_PIPE))
+                f_trunc(ino);
+    }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_ideref_post = (uint16_t)(uarg_t)ino;
+#endif
 
     /* If the inode was modified, we must write it to disk. */
     if(!(ino->c_refs) && (ino->c_flags & CDIRTY))
     {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_last_ideref_wr = (uint16_t)(uarg_t)ino;
+#endif
         if(!(ino->c_node.i_nlink))
         {
             ino->c_node.i_mode = 0;
             i_free(ino->c_dev, ino->c_num);
         }
-        wr_inode(ino);
+        WR_INODE(2, ino);
     }
 }
 
@@ -913,7 +1097,7 @@ void wr_inode(register inoptr ino)
 /*    struct blkbuf *buf;
     blkno_t blkno;
 */
-    magic(ino);
+    MAGIC_CHECK(3, ino);
 
     if (bwritei(ino))
         corrupt_fs(ino->c_dev);
@@ -1129,13 +1313,43 @@ inoptr getinode(uint_fast8_t uindex)
 
     oftindex = udata.u_files[uindex];
 
-    if(oftindex >= OFTSIZE || oftindex == NO_FILE)
+    if(oftindex >= OFTSIZE || oftindex == NO_FILE) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        spr_gfr = 1;
+        spr_gfu = uindex;
+        spr_gfo = oftindex;
+        spr_gffr = 0xFF;
+        spr_gffa = 0xFF;
+        spr_gfin = 0;
+        spr_gfs = (uint16_t)udata.u_callno |
+            ((uint16_t)udata.u_insys << 8);
+        udata.u_error = EBADF;
+        return NULLINODE;
+#else
         panic(PANIC_GETINO_BADT);
+#endif
+    }
 
-    if((inoindex = of_tab[oftindex].o_inode) < i_tab || inoindex >= i_tab+ITABSIZE)
+    inoindex = of_tab[oftindex].o_inode;
+
+    if(inoindex < i_tab || inoindex >= i_tab+ITABSIZE) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        spr_gfr = 2;
+        spr_gfu = uindex;
+        spr_gfo = oftindex;
+        spr_gffr = of_tab[oftindex].o_refs;
+        spr_gffa = of_tab[oftindex].o_access;
+        spr_gfin = (uint16_t)(uarg_t)inoindex;
+        spr_gfs = (uint16_t)udata.u_callno |
+            ((uint16_t)udata.u_insys << 8);
+        udata.u_error = EBADF;
+        return NULLINODE;
+#else
         panic(PANIC_GETINO_OFT);
+#endif
+    }
 
-    magic(inoindex);
+    MAGIC_CHECK(4, inoindex);
     return(inoindex);
 }
 
@@ -1347,8 +1561,26 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
 
 void magic(inoptr ino)
 {
-    if(ino->c_magic != CMAGIC)
+    if(ino->c_magic != CMAGIC) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        uint_fast8_t slot = 0xFF;
+        uint16_t pid = 0;
+
+        if (ino >= i_tab && ino < i_tab + ITABSIZE)
+            slot = (uint_fast8_t)(ino - i_tab);
+        if (udata.u_ptab)
+            pid = udata.u_ptab->p_pid;
+        kprintf("magic0 ptr=%x slot=%x site=%x mg=%x dev=%x num=%x refs=%x fl=%x pid=%x sys=%x in=%x\n",
+            ino, slot, sprinter_magic_site,
+            ino->c_magic, ino->c_dev, ino->c_num,
+            ino->c_refs, ino->c_flags,
+            pid, udata.u_callno, udata.u_insys);
+        kprintf("magic0 raw=%x %x %x %x\n",
+            ((uint8_t *)ino)[0], ((uint8_t *)ino)[1],
+            ((uint8_t *)ino)[2], ((uint8_t *)ino)[3]);
+#endif
         panic(PANIC_CORRUPTI);
+    }
 }
 
 /* This is a helper function used by _unlink and _rename; it doesn't really

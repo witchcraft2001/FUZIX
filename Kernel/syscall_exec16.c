@@ -6,6 +6,9 @@
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
+extern uint8_t sprinter_last_exec_entry[16];
+extern uint16_t sprinter_last_exec_isp;
+extern uint8_t sprinter_last_exec_stack[16];
 #define EX_TRACE(x) plt_trace(x)
 #else
 #define EX_TRACE(x) do { } while (0)
@@ -404,6 +407,11 @@ arg_t _execve(void)
 	EX_TRACE((uint8_t)(((uarg_t)udata.u_isp) >> 8));
 	EX_TRACE((uint8_t)top);
 	EX_TRACE((uint8_t)(top >> 8));
+	sprinter_last_exec_isp = (uint16_t)(uarg_t)udata.u_isp;
+	uget((void *)(progload + hdr.a_entry), sprinter_last_exec_entry,
+		sizeof(sprinter_last_exec_entry));
+	uget((void *)udata.u_isp, sprinter_last_exec_stack,
+		sizeof(sprinter_last_exec_stack));
 #endif
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
@@ -412,7 +420,7 @@ arg_t _execve(void)
 	 * confirmation on the screen regardless of the user program's
 	 * own stdio setup. */
 	if (udata.u_ptab->p_pid == 1)
-		kputs("KERNEL OK - userland running\r\n");
+		kputs("SPRINTER USERLAND OK\r\n");
 #endif
 
 	/* Start execution (never returns) */

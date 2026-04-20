@@ -114,7 +114,7 @@ arg_t _mknod(void)
 	ino->c_node.i_mode = mode & ~udata.u_mask;
 	ino->c_node.i_addr[0] = isdevice(ino) ? dev : 0;
 	setftime(ino, A_TIME | M_TIME | C_TIME);
-	wr_inode(ino);
+	WR_INODE(21, ino);
 
 	i_unlock_deref(ino);
 	return (0);

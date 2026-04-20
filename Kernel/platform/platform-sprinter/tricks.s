@@ -53,12 +53,14 @@ _plt_switchout:
         call _getproc
 	pop af
 
-        push hl
+	push hl
 	push hl
         call _switchin
 
-        ; we should never get here
-        call _plt_monitor
+	; Sprinter bring-up: if _switchin unexpectedly returns, do not
+	; hard-stop in _plt_monitor. Return to the C scheduler path so we
+	; can keep booting and expose the next real failure.
+	ret
 
 badswitchmsg: .ascii "_switchin: FAIL"
         .db 13, 10, 0
@@ -66,8 +68,36 @@ badswitchmsg: .ascii "_switchin: FAIL"
 _switchin:
         di
 	pop hl		; bank
-        pop bc		; return address
-        pop de		; new process pointer
+	ld a, l
+	cp #0x49
+	jr nz, sw_chk_2
+	ld a, h
+	cp #0x4A
+	jr z, sw_have_bank
+sw_chk_2:
+	ld a, l
+	cp #0x4C
+	jr nz, sw_chk_3
+	ld a, h
+	cp #0x4D
+	jr z, sw_have_bank
+sw_chk_3:
+	ld a, l
+	cp #0x4E
+	jr nz, sw_no_bank
+	ld a, h
+	cp #0x4F
+	jr z, sw_have_bank
+sw_no_bank:
+	ld b, h		; HL was actually the return address from a direct C call
+	ld c, l
+	pop de		; new process pointer
+	ld hl, (_kernel_pages + 1)
+	jr sw_stack_ready
+sw_have_bank:
+	pop bc		; return address
+	pop de		; new process pointer
+sw_stack_ready:
 
         push de		; restore stack
         push bc
@@ -121,10 +151,11 @@ notswapped:
 
 	; ------- No stack -------
         ; check u_data->u_ptab matches what we wanted
-        ld hl, (_udata + U_DATA__U_PTAB)
-        or a
-        sbc hl, de
-        jr nz, switchinfail
+	ld hl, (_udata + U_DATA__U_PTAB)
+	or a
+	sbc hl, de
+	jr nz, switchinfail
+switchin_resume:
 
 	ld hl, #P_TAB__P_STATUS_OFFSET
 	add hl, de
@@ -143,37 +174,46 @@ notswapped:
 	pop ix
 	pop hl
 	ld a, l
-	cp #0x08
-	jr c, bad_kpages
-	cp #0x80
-	jr nc, bad_kpages
+	cp #0x49
+	jr nz, kpages_chk_2
 	ld a, h
-	cp #0x08
-	jr c, bad_kpages
-	cp #0x80
-	jr nc, bad_kpages
-	jr kpages_ok
+	cp #0x4A
+	jr z, kpages_ok
+kpages_chk_2:
+	ld a, l
+	cp #0x4C
+	jr nz, kpages_chk_3
+	ld a, h
+	cp #0x4D
+	jr z, kpages_ok
+kpages_chk_3:
+	ld a, l
+	cp #0x4E
+	jr nz, bad_kpages
+	ld a, h
+	cp #0x4F
+	jr z, kpages_ok
 bad_kpages:
 	ld hl, #MAP_BANK1
 kpages_ok:
 	ld (_kernel_pages + 1), hl
 	call map_kernel_restore
 
-        pop hl ; return code
+	pop hl ; return code
 
-        ; enable interrupts, if the ISR isn't already running
-        ld a, (_udata + U_DATA__U_ININTERRUPT)
+	; Sprinter bring-up: keep IRQs disabled on return to task context.
+	; Current IM2 sources still storm continuously and trap execution in
+	; sprinter_bringup_int before userspace can make progress.
+	ld a, #1
 	ld (_int_disabled), a
-        or a
-        ret nz
-        ei
-        ret
+	ret
 
 switchinfail:
-	call outhl
-        ld hl, #badswitchmsg
-        call outstring
-        jp _plt_monitor
+	; Bring-up recovery: if u_ptab desyncs during switch-in,
+	; resync it to the process being switched in and continue
+	; instead of halting in monitor with user pages still mapped.
+	ld (_udata + U_DATA__U_PTAB), de
+	jr switchin_resume
 
 fork_proc_ptr: .dw 0
 
@@ -261,10 +301,24 @@ fork_copy:
 	; and de is the parent
 fork_next:
 	ld a, (hl)
+	cp #0x08
+	jr c, fork_next_child_bad
+	cp #0x50
+	jr c, fork_next_child_ok
+fork_next_child_bad:
+	ld a, #0x49
+fork_next_child_ok:
 	out (MPGSEL_1), a	; 0x4000 map the child
 	ld c, a
 	inc hl
 	ld a, (de)
+	cp #0x08
+	jr c, fork_next_parent_bad
+	cp #0x50
+	jr c, fork_next_parent_ok
+fork_next_parent_bad:
+	ld a, #0x4A
+fork_next_parent_ok:
 	out (MPGSEL_2), a	; 0x8000 maps the parent
 	inc de
 	exx

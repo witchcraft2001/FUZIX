@@ -60,7 +60,13 @@
 	.globl _int_disabled
         .globl _plt_monitor
         .globl _plt_trace
-        .globl _sprinter_nullh_count
+	.globl _sprinter_nullh_count
+	.globl _spr_sys_enter_no
+	.globl _spr_sys_exit_no
+	.globl _spr_sys_exit_err
+	.globl _spr_sys_exit_up0
+	.globl _spr_sys_exit_up1
+	.globl _spr_sys_exit_up2
         .globl _unix_syscall
         .globl outstring
         .globl kstack_top
@@ -91,42 +97,17 @@ deliver_signals:
 	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 	ret z
-
-deliver_signals_2:
-	ld l, a
-	ld h, #0
-	push hl		; signal number as C argument to the handler
-
-	; Handler to use
-	add hl, hl
-	ld de, #_udata + U_DATA__U_SIGVEC
-	add hl, de
-	ld e, (hl)
-	inc hl
-	ld d,(hl)
-
-	ld bc, #signal_return
-	push bc		; bc is passed in as the return vector
-
-	ld c,a		; save signal number for called routioe
-
-	; Indicate processed
+	; Sprinter bring-up: disable user-space signal delivery entirely until
+	; exec/syscall return paths are stable. This avoids looping in the
+	; signal trampoline instead of reaching a shell.
 	xor a
 	ld (_udata + U_DATA__U_CURSIG), a
-	; and we will handle the signal with interrupts on so clear the
-	; flag
-	ld (_int_disabled),a
+	ret
 
-	; Semantics for now: signal delivery clears handler
-	ld (hl), a
-	dec hl
-	ld (hl), a
-
-
-	ei
-	ld hl,(PROGLOAD+16)
-	jp (hl)		; return to user space. This will then return via
-			; the return path handler passed in BC
+deliver_signals_2:
+	xor a
+	ld (_udata + U_DATA__U_CURSIG), a
+	ret
 
 ;
 ;	Syscall signal return path
@@ -174,6 +155,7 @@ unix_syscall_entry:
         add hl, sp
         ; save system call number
         ld (_udata + U_DATA__U_CALLNO), a
+	ld (_spr_sys_enter_no), a
         ; advance to syscall arguments
         ; copy arguments to common memory
         ld de, #_udata + U_DATA__U_ARGN
@@ -214,7 +196,53 @@ unix_syscall_entry:
 	; The fork case returns with a different U_DATA mapped so the
 	; U_DATA referencing code is fine, but globals are usually not
 
-        di
+	di
+
+	ld a, (_udata + U_DATA__U_CALLNO)
+	ld (_spr_sys_exit_no), a
+	ld hl, (_udata + U_DATA__U_ERROR)
+	ld (_spr_sys_exit_err), hl
+	ld a, (_udata + U_DATA__U_PAGE)
+	ld (_spr_sys_exit_up0), a
+	ld a, (_udata + U_DATA__U_PAGE + 1)
+	ld (_spr_sys_exit_up1), a
+	ld a, (_udata + U_DATA__U_PAGE + 2)
+	ld (_spr_sys_exit_up2), a
+
+	; If u_page[] got clobbered, rebuild it from current ptab entry
+	; before mapping back to user. This avoids returning with
+	; fallback pages (0x08/0x09/0x0A) and executing random memory.
+	ld a, (_udata + U_DATA__U_PAGE)
+	cp #0x08
+	jr c, spr_fix_upage
+	cp #0x50
+	jr nc, spr_fix_upage
+	ld a, (_udata + U_DATA__U_PAGE + 1)
+	cp #0x08
+	jr c, spr_fix_upage
+	cp #0x50
+	jr nc, spr_fix_upage
+	ld a, (_udata + U_DATA__U_PAGE + 2)
+	cp #0x08
+	jr c, spr_fix_upage
+	cp #0x50
+	jr c, spr_upage_ok
+spr_fix_upage:
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld de, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 1), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 2), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 3), a
+spr_upage_ok:
 
 
 	call map_proc_always
@@ -261,8 +289,7 @@ unix_pop:
         pop de
         pop bc
         exx
-        ei
-        ret ; must immediately follow EI
+	 ret
 
 
 via_signal:
@@ -274,11 +301,28 @@ via_signal:
 	ld hl, (_udata + U_DATA__U_RETVAL)
 	push hl
 
+	; Sprinter bring-up: suppress signal delivery for pid 1.
+	; Current false-positive signal paths are dropping init into the
+	; user-space __sighandler trampoline before boot is stable.
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld de, #P_TAB__P_PID_OFFSET
+	add hl, de
+	ld a, (hl)
+	cp #1
+	jr nz, via_signal_dispatch
+	xor a
+	ld (_udata + U_DATA__U_CURSIG), a
+	jr via_signal_restore
+
 	; Signal processing. This may longjmp back into userland
+
+via_signal_dispatch:
 	call deliver_signals_2
 
 	; If not then we recover the syscall return values and
 	; exit via the syscall return path
+
+via_signal_restore:
 	pop de			; retval
 	pop hl			; errno
 	jr unix_return
@@ -291,7 +335,6 @@ _doexec:
         call map_proc_always
 
         pop bc ; return address
-	pop af ; bank number
         pop de ; start address
 
         ld hl, (_udata + U_DATA__U_ISP)
@@ -307,8 +350,7 @@ _doexec:
 	; we can generate this from the start address
 	ld d,h
 	ld e,#0
-        ei
-        jp (hl)
+	        jp (hl)
 
 ;
 ;  Called from process context (hopefully)
@@ -324,12 +366,21 @@ null_handler:
 	inc (hl)
 	pop hl
 	pop af
-	; Rather than try to recover by sending SIGBUS + exit syscall from
-	; within this irregular context (which can recurse into null_handler
-	; a second time while INSYS=1 and trip trap_illegal → plt_monitor),
-	; just jump directly into plt_monitor so the halt is recorded with a
-	; clean trace marker and without cascading failures.
-	jp _plt_monitor
+	di
+	; IRQ-context NULL jump is still fatal
+	ld a, (_udata + U_DATA__U_ININTERRUPT)
+	or a
+	jp nz, trap_illegal
+	; In bring-up we also route in-syscall NULL jumps through doexit so
+	; a broken task doesn't hard-stop the whole machine in _plt_monitor.
+	ld hl, #9		; SIGKILL
+	ld sp, #kstack_top
+	call map_kernel_di
+	push hl
+	push af
+	call _doexit
+	pop af
+	ret
 
 
 
@@ -337,8 +388,21 @@ illegalmsg: .ascii "[trap_illegal]"
         .db 13, 10, 0
 
 trap_illegal:
+	ld a, (_udata + U_DATA__U_ININTERRUPT)
+	or a
+	jr nz, trap_illegal_halt
+	ld sp, #kstack_top
+	call map_kernel_di
+	ld hl, #9
+	push hl
+	push af
+	call _doexit
+	pop af
+	ret
+trap_illegal_halt:
         ld hl, #illegalmsg
         call outstring
+	ret
         call _plt_monitor
 
 dpsmsg: .ascii "[dispsig]"
@@ -453,7 +517,7 @@ intret:
 .ifeq PROGBASE
 	ld a, (0)
 	cp #0xC3
-	jp nz, null_pointer_trap
+	; Sprinter bring-up: skip forced null trap guard here.
 .endif
 
 	; Loop through any pending signals. These could longjmp out
@@ -499,7 +563,7 @@ null_pointer_trap:
 	push af
 	call _doexit
 	pop af
-	jp _plt_monitor
+	ret
 
 ;
 ;	Pre-emption. We need to get off the interrupt stack, switch task

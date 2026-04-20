@@ -272,6 +272,414 @@ CODE3 overlay — a banked syscall target was active), `PG3=0x46` (init's
 own common page).  Banking is clean; the halt is a genuine refcount
 bug.
 
+### Iteration: inode ref/deref tracing for inode 0x0032
+
+Added targeted tracing (guarded by `CONFIG_SPRINTER_EARLY_TRACE`) to expose
+every refcount transition for the crashing inode (`dev=1 num=0x0032`):
+
+- `i_deref()` emits:
+
+  ```
+  ID dev=... num=... refs=old>new nlink=... mode=... pid=... sys=... in=... at=...
+  ```
+
+- `i_open()` / `fmount()` emit matching `IR ...` increments for this inode
+  (`at=10` and `at=11` respectively).
+- Underflow panic line (`i_deref0 ...`) now includes `pid`, `sys` and
+  `u_insys` so the failing path can be tied to syscall context.
+
+The earlier global `i_ref()` macro wrapper was reverted: it changed call shape
+kernel-wide and produced unstable early boots (blank screen, early return from
+`_execve` with `EX_TRACE 0xD0/0x13`).  Tracing is now local to `filesys.c` only.
+
+This should let us replay one failing boot and identify which path adds one
+fewer ref than it drops for inode 50.
+
+### Update from next replay: panic moved to `PANIC_CORRUPTI`
+
+On the latest run the halt happened earlier as:
+
+```
+panic: corrupt inode
+```
+
+So the immediate fault is now a failed `magic()` check (bad `c_magic`) rather
+than `i_deref0` underflow.  Added temporary `magic()` context diagnostics under
+`CONFIG_SPRINTER_EARLY_TRACE`:
+
+- `magic0 ptr=... slot=... site=... mg=... dev=... num=... refs=... fl=... pid=... sys=... in=...`
+- `magic0 raw=.. .. .. ..`
+
+`site` values map to `filesys.c` call sites:
+
+- `site=1` — `n_open()` walker (`magic(ninode)`)
+- `site=2` — `i_deref()` entry
+- `site=3` — `wr_inode()` entry
+- `site=4` — `getinode()` check
+
+This should identify whether the broken inode is a poisoned `i_tab` slot or an
+invalid pointer path.
+
+Latest replay produced:
+
+```
+magic0 ptr=4BB7 slot=00FF site=0003 mg=FDE1 dev=FD19 num=0036 refs=00D1 fl=00D5 pid=0001 sys=001E in=0001
+magic0 raw=00E1 00FD 0019 00FD
+```
+
+Interpretation:
+
+- `site=3` confirms failure at `wr_inode()` entry (called from `i_deref`).
+- `slot=0xFF` shows `ino` is not inside `i_tab`.
+- `ptr=0x4BB7` points into banked code, not an inode struct.
+
+So this is an invalid inode pointer reaching `wr_inode`, not a simple
+`dev=1,num=0x32` refcount underflow.
+
+To reduce diagnostic perturbation, the per-call `ID ...` emit inside `i_deref`
+was removed (it changed stack shape on a hot path).  `magic0 ...` remains.
+
+Added low-impact pointer snapshots around `i_deref` (no `kprintf`, memory-only):
+
+- `_sprinter_last_ideref_in`   (`0xFC0A`) — pointer on `i_deref` entry
+- `_sprinter_last_ideref_post` (`0xFC0C`) — pointer after the `--c_refs` path
+- `_sprinter_last_ideref_wr`   (`0xFC0E`) — pointer right before `wr_inode`
+- `_sprinter_last_ideref_meta` (`0xFC10`) — low byte `u_callno`, high byte `u_insys`
+
+Current trace buffer moved accordingly:
+
+- `_sprinter_trace_idx` = `0xFC12`
+- `_sprinter_trace_buf` = `0xFC14..0xFD13`
+
+Next replay with `WR_INODE(site, ino)` wrapper showed:
+
+- `_sprinter_last_wr_site = 0x01` (callsite in `newfile()`)
+- `_sprinter_last_wr_ptr = 0x4BB8` (invalid; code/common area, not `i_tab`)
+
+So the bad pointer reaches `wr_inode` via `newfile()` path, and is already
+corrupt before `wr_inode` runs.  The earlier per-`i_open` `IR` trace in this
+path was removed because SDCC emitted fragile stack choreography around that
+instrumentation; diagnostics now keep only memory snapshots and the `WR_INODE`
+site tag.
+
+Added one more low-impact probe around `newfile()` to determine whether the
+bad pointer is returned by `i_open()` or corrupted later in `newfile`:
+
+- `_sprinter_last_newfile_pino` at `0xFC17`
+- `_sprinter_last_newfile_nindex_in` at `0xFC19`
+- `_sprinter_last_newfile_nindex_pr` at `0xFC1B` (just before `WR_INODE(1,...)`)
+
+Also fixed a typo in `newfile()` lock ordering call (`i_lock(ino)` ->
+`i_lock(nindex)`). The lock macro is currently a no-op on this config, but the
+source now matches intended semantics.
+
+Because of the added probes, trace addresses moved again:
+
+- `_sprinter_trace_idx` = `0xFC1D`
+- `_sprinter_trace_buf` = `0xFC1F..0xFD1E`
+
+Latest replay changed failure shape again:
+
+```
+magic0 ptr=0000 slot=00FF site=0002 mg=91E7 dev=0060 num=0000 refs=0000 fl=0000 pid=0001 sys=001E in=0001
+magic0 raw=00E7 0091 0060 0000
+```
+
+This is `MAGIC_CHECK(2, ino)` at `i_deref()` entry with `ino == NULL`.
+So at least one path now calls `i_deref(NULLINODE)` during init syscall flow.
+
+Temporary bring-up guard added under `CONFIG_SPRINTER_EARLY_TRACE`:
+
+- `i_deref` now logs `i_deref null pid=... sys=... in=...` and returns early
+  when `ino == NULL`.
+
+Follow-up replay confirms `i_deref(null)` happens repeatedly after
+`KERNEL OK - userland running` (various `sys=` values observed), and once with
+display corruption/hang before panic.
+
+The null guard is now unconditional in `i_deref` (still with trace print under
+`CONFIG_SPRINTER_EARLY_TRACE`). This is a safe core hardening change: callers
+already treat `NULLINODE` as a sentinel in many paths, and deref-on-null was
+causing non-diagnostic crashes.
+
+This avoids a misleading `panic: corrupt inode` on null dereference and lets us
+progress to the next failing condition.
+
+Current diagnostics layout:
+
+- `_sprinter_last_iopen_dev` = `0xFC1D`
+- `_sprinter_last_iopen_ino` = `0xFC1F`
+- `_sprinter_last_iopen_ret` = `0xFC21`
+- `_sprinter_last_panic_ptr` = `0xFC23`
+- `_sprinter_last_panic_bytes` = `0xFC25..0xFC28`
+- `_sprinter_chlink_stage` = `0xFC29`
+- `_sprinter_chlink_wd` = `0xFC2A`
+- `_sprinter_chlink_nindex` = `0xFC2C`
+- `_sprinter_chlink_done` = `0xFC2E`
+- `_sprinter_chlink_error` = `0xFC30`
+- `_sprinter_trace_idx` = `0xFC32`
+- `_sprinter_trace_buf` = `0xFC34..`
+
+Latest replay showed a new top-level failure:
+
+```
+panic: getinode: bad OFT
+```
+
+Snapshot at failure indicated repeated `i_deref(NULL)` events before panic
+(`_sprinter_ideref_null_count=7`, last syscall `0x0102`), and panic string
+pointer `0x07FA` (`"geti"...`).
+
+To keep boot moving and capture the exact bad descriptor state, `getinode()` now
+returns `EBADF` (instead of panic) under `CONFIG_SPRINTER_EARLY_TRACE` when the
+OFT index or OFT inode pointer is invalid, and stores a compact snapshot:
+
+- `_spr_gir` (`0xFC36`): reason (`1` bad OFT index, `2` bad OFT inode ptr)
+- `_spr_giu` (`0xFC37`): fd (`uindex`)
+- `_spr_gio` (`0xFC38`): `u_files[uindex]` snapshot
+- `_spr_gifr` (`0xFC39`): `of_tab[oftindex].o_refs`
+- `_spr_gifa` (`0xFC3A`): `of_tab[oftindex].o_access`
+- `_spr_giin` (`0xFC3B`): `of_tab[oftindex].o_inode`
+- `_spr_gis` (`0xFC3D`): low=`u_callno`, high=`u_insys`
+
+Replay with this probe reported consistent invalid-descriptor hits before
+hang:
+
+- `_spr_gir=1` (`bad OFT index`) and `_spr_gfcnt=0x0030`
+- latched failure tuple: `fd=0x50`, `u_files[fd]=0x47`,
+  `o_refs=0xFF`, `o_access=0xFF`, `o_inode=0x0000`
+
+To prevent this tuple from being overwritten by subsequent `getinode()` calls,
+the failure snapshot is now latched (`spr_gf*`) only on the failing path.
+
+Another replay showed CPU parked near `plt_interrupt_all` (`PC≈0xF175`) with
+`PG1/PG2=0x4E/0x4F` and no forward progress after `KERNEL OK - userland running`.
+This matches an IRQ reentry/livelock on a level-triggered source.
+
+Bring-up IRQ stub is now temporarily hardened to always absorb IRQs (pin
+`_int_disabled=1`, `RETI`, no jump to core `interrupt_handler`). This is a
+diagnostic containment step to avoid livelock while we continue tracing fd/OFT
+state corruption.
+
+Follow-up replay still showed unstable execution (`PC` reaching non-code
+data-like addresses) while the bad-`getinode` tuple remained the same.
+To reduce diagnostic side effects in this phase:
+
+- `getinode()` tracing is simplified: only fail-path latch writes remain.
+- syscall context for the latch is captured directly at fail time.
+- `plt_trace()` is temporarily a no-op (returns immediately).
+
+Newest replay then showed `PG2=0x50` (outside the kernel code-bank set
+`{0x49,0x4A,0x4C,0x4D,0x4E,0x4F}`) with `PC` jumping into non-code space.
+`sanitize_bc_map` has been tightened from a generic `0x08..0x7F` range check to
+an explicit whitelist of valid bank pairs only:
+
+- `0x4A49` (CODE1)
+- `0x4D4C` (CODE2)
+- `0x4F4E` (CODE3)
+
+Any other pair now falls back to `MAP_BANK1` immediately.
+
+Latest replay still showed `PG2=0x50` while userland was running.  The root
+cause is that the generic page validators in `map_proc_2` / `map_for_swap`
+accepted any page `< 0x80`, which includes VRAM (`0x50..0x5F`).  That allows
+an already-corrupted `u_page[]` byte to map VRAM into a code window, after
+which user execution quickly degrades into random opcodes (`call 0x0100`
+with garbage syscall numbers, screen filled with garbage).
+
+Mapping guards are now tightened to the real RAM-process range only:
+
+- accept pages `0x08..0x4F`
+- reject `>= 0x50` (VRAM/MMIO window)
+
+`sanitize_kpages` now also normalizes `_kernel_pages[1..2]` through the same
+`sanitize_bc_map` whitelist used by bank stubs, so kernel-side bank metadata
+cannot drift to an invalid pair.
+
+As an additional runtime guard, all dynamic WIN2 (`MPGSEL_2`) writes on the
+syscall/bank-stub paths now go through `set_mpgsel2_safe`: values `>= 0x50`
+are clamped to `0x4A` before touching the port.  This prevents accidental
+VRAM mapping in WIN2 from turning user/syscall execution into garbage.
+
+Clamp telemetry (for post-mortem dumps):
+
+- `_spr_pg2_clamp_count` (`0xFC70`) - number of forced clamps
+- `_spr_pg2_last_raw` (`0xFC72`) - last raw WIN2 page value before clamp
+
+Follow-up dump still had `PG2=0x50` with `_spr_pg2_clamp_count=0` and
+`_spr_pg2_last_raw=0x4F`, meaning the bad mapping did not come from the
+bank-stub/runtime paths guarded above.  Additional guards were added in the
+remaining direct process-page mappers:
+
+- `usermem.s:user_map_de` now validates user pages as `0x08..0x4F`
+  (both WIN1 and WIN2 legs; `>=0x50` rejected)
+- `tricks.s:fork_copy` now validates child/parent pages before writing
+  `MPGSEL_1/2` (`>=0x50` rejected)
+
+This closes the remaining routes that could map VRAM page `0x50` into WIN2
+via corrupted `u_page[]` / `p_page[]` metadata.
+
+Another replay after these guards still showed `PG2=0x50`, while latches were:
+
+- `_spr_sys_enter_no=0x01`
+- `_spr_sys_exit_no=0x02`
+- `_spr_sys_exit_err=0x001E`
+- `_spr_pg2_clamp_count=0`
+- `_spr_pg2_last_raw=0x4F`
+
+This points away from the validated map/stub/usermem/fork paths and toward
+transient VRAM mapping lifetime in the text console path.  `sprvideo.s` now
+uses a re-entrant `map_vr`/`unmap_vr` guard (`map_vr_depth`) and a safe
+restore clamp in `unmap_vr` (`saved_vr_page >= 0x50` => restore `0x4A`).
+The goal is to prevent nested or interrupted console draws from leaving WIN2
+on VRAM.
+
+Latest replay no longer showed VRAM mapped in WIN2 (`PG2=0x4F`) and reached
+`HALT` in `_plt_monitor` (`PC≈0xF16A`), with `_sprinter_nullh_count` non-zero.
+That indicates control reached `null_handler` (user NULL jump) instead of a
+raw bank/VRAM corruption hang.
+
+`null_handler` in `lowlevel-z80-banked.s` is now switched from immediate
+`jp _plt_monitor` to the standard synchronous-fault path used by the non-banked
+Z80 core logic:
+
+- if `u_insys`/`u_ininterrupt` is set -> `trap_illegal` (monitor)
+- otherwise kill the current task via `_doexit(SIGKILL)` on kernel stack
+
+This keeps user-space NULL faults from hard-stopping the entire machine and
+lets init/respawn logic continue.
+
+Follow-up replay still hit `trap_illegal` monitor with `PG2=0x4F` (no VRAM
+corruption) and `PC` at `_plt_monitor`.  For bring-up, `null_handler` has been
+relaxed one more step: only NULL jumps in IRQ context (`u_ininterrupt!=0`) are
+treated as fatal; NULL in normal or in-syscall task context is routed through
+`_doexit(SIGKILL)` to kill the offending task and keep the machine alive.
+
+Next replay then sat with `PC` inside `sprinter_bringup_int` (`plt_interrupt_all`
+region) while border artifacts were active, indicating IM2 IRQ churn during
+bring-up.  IRQ policy is now temporarily forced to absorb all IM2 interrupts in
+`sprinter_bringup_int` (always set `_int_disabled=1`, `reti`) to prevent
+reentry/dispatch instability until userland boot is stable.
+
+Subsequent replay still reached `_plt_monitor` with stable banks
+(`PG1/PG2/PG3 = 0x4E/0x4F/0x46`).  To avoid hard-stop on user/task illegal
+faults during bring-up, `trap_illegal` in `lowlevel-z80-banked.s` now mirrors
+the temporary null-handler policy: if not in IRQ context, switch to kernel
+stack/map and route the fault through `_doexit(SIGKILL)` first; only then fall
+back to monitor if control returns.
+
+Another replay then failed with `panic: getproc: extra running`. For bring-up,
+`getproc()` now has a Sprinter-only early-trace recovery path: if a stale
+`P_RUNNING` slot is encountered while selecting the next runnable task, it is
+demoted to `P_READY` and scheduling continues instead of triggering
+`PANIC_GETPROC`.
+
+Next failure (`i_alloc: corrupt superblock` followed by `panic: want busy
+block`) indicates leaked `BF_BUSY` cache entries on task-fault recovery paths.
+`bfind()` now has a temporary Sprinter early-trace fallback: if a matching
+buffer is found busy, treat it as stale and clear `bf_busy` instead of
+panicking with `PANIC_WANTBSYB`.
+
+Repeated `i_alloc: corrupt superblock` while `/init` was running showed that
+the old write-disable safety net was no longer viable (dirty metadata was
+being treated as written, then later reloaded stale from disk).  Bring-up now
+re-enables real block writes on the Sprinter path (`bdwrite` -> `td_write`,
+`_devide_write_data` 512-byte OUT loop restored).
+
+Latest replay then halted with `PC` in low RAM/data (`0x0B78`) and kernel banks
+mapped (`PG1/2/3 = 0x49/0x4A/0x4B`), which is consistent with a bad user page
+table falling back to kernel pages at syscall return.  `map_proc_2` fallback is
+now changed to a non-kernel clamp (`0x08/0x09/0x0A`) and syscall-exit latches
+now also snapshot `u_page[0..2]` (`_spr_sys_exit_up0..2`) to confirm whether
+`u_page` corruption is happening before the return path.
+
+Follow-up replay confirmed this path: `PG1/2/3 = 0x08/0x09/0x0A/0x4B` and
+`_spr_sys_exit_up0..2` were zero, so return-to-user happened with clobbered
+`u_page[]`.  Syscall-exit path now rebuilds `u_page[0..3]` from
+`u_ptab->p_page/p_page2` before `map_proc_always` when any of the first three
+entries is out of range.
+
+Another dump still showed repeated `i_alloc: corrupt superblock` while the
+copy helper in `usermem.s:user_map_de` was falling back to kernel pages
+(`0x49/0x4A`) on invalid user-page bytes.  That can redirect `__uput/__uget`
+traffic into kernel memory and poison filesystem state.  `user_map_de` fallback
+is now switched to safe user pages (`0x08/0x09`).
+
+One more structural issue found during this pass: diagnostics growth had pushed
+`_COMMONDATA` past `0xFF00` into the IM2 vector area.  Unused legacy
+`pv_oldsp/pv_stack` reserve is removed so `_COMMONDATA` now ends below vectors
+again.  Added `i_alloc` corrupt-path latches (`_spr_iac_*`) to capture
+superblock fields at first failure.
+
+Bring-up safety was tightened further around PID 1 exits: under
+`CONFIG_SPRINTER_EARLY_TRACE`, `doexit()` no longer panics immediately on
+`pid==1` (`PANIC_KILLED_INIT`), and instead returns with `u_error=EFAULT` so
+the system can continue and expose the underlying filesystem corruption cause.
+
+### Current handoff state (session checkpoint)
+
+Current visible boot output is stable up to:
+
+- `Devboot`
+- `OK`
+- `Starting /init`
+- `KERNEL OK - userland running`
+
+After that, the machine still falls into `_plt_monitor` (`PC=0xF16A`, `HALT=1`).
+Recent dumps repeatedly show `PG1/PG2=0x44/0x43` at the hang point (user pages
+left mapped while monitor runs), with `PG3=0x4B`.
+
+Fixes applied in this session to remove known immediate causes:
+
+1. `lowlevel-z80-banked.s`: removed forced monitor fall-through after `_doexit`
+   in `null_handler` / `trap_illegal` paths (return instead of unconditional
+   `jp/call _plt_monitor` on non-IRQ recovery).
+2. `tricks.s:_switchin`: replaced broad kernel-page acceptance with strict
+   whitelist (`0x4A49`, `0x4D4C`, `0x4F4E`) before `map_kernel_restore`.
+3. `usermem.s:__uget`: fixed zero-length path so it does not enter user map
+   and exit without `map_kernel_restore_u`.
+4. `tricks.s:switchinfail`: temporary bring-up recovery now resyncs
+   `udata.u_ptab = de` and continues, instead of hard stop in monitor.
+5. `lowlevel-z80-banked.s:intret`: disabled the `PROGBASE` forced
+   `null_pointer_trap` branch (`*(0) != 0xC3`) for bring-up, as it was
+   repeatedly driving recovery into monitor loop during unstable mapping.
+6. `process.c:doexit()`: if `switchin(getproc())` unexpectedly returns on
+   Sprinter bring-up, do not immediately panic with `PANIC_DOEXIT`; return
+   instead so the next real failure can surface.
+
+What to check first in the next session:
+
+- Identify who still enters `_plt_monitor` after `KERNEL OK` now that the
+  explicit fall-throughs were removed.  Highest-probability path is remaining
+  direct monitor calls from lowlevel/tricks side while still on user mapping.
+- Add a tiny one-shot latch for monitor entry source (caller PC + current
+  `PG1/PG2/PG3`) right in `_plt_monitor` prologue to disambiguate whether it is
+  a `switchinfail`-class path, legacy interrupt path, or another trap route.
+- Check whether the observed `_plt_monitor` caller stack (`0x5131`-range inside
+  `doexit`) disappears after suppressing `PANIC_DOEXIT` on unexpected
+  `switchin()` return.
+
+### Temporary userland bring-up override
+
+While the full `Applications/util/init` path is still unstable on Sprinter,
+the platform package now overrides `/init` with a minimal userspace probe.
+Current override is `Applications/util/sprinit0`, a pure Z80 assembly binary
+that just enters an infinite loop with no libc/crt0/syscall dependencies.
+This is intentionally Sprinter-only (`fuzix-platform-sprinter.pkg`) and is a
+bring-up tool to verify that:
+
+- `execve()` reaches live userland reliably
+- first userspace console write works
+- console I/O works without the SysV init/getty/login stack in the middle
+
+Once the underlying early-userland bug is fixed, remove the override and
+restore the stock `/init` from `fuzix-basefs.pkg`.
+
+Trace buffer moved to:
+
+- `_sprinter_trace_idx` = `0xFC3F`
+- `_sprinter_trace_buf` = `0xFC41..`
+
 ### Milestone: init's own common page (April 2026)
 
 Previously the first fork from real `/init` corrupted kernel common
@@ -457,6 +865,82 @@ of it should be removed in the final pass (see task #5):
 - Counters: `_sprinter_nmi_count` (NMIs absorbed by `sprinter_nmi_stub`)
   and `_sprinter_nullh_count` (entries to `null_handler`) are easy
   sanity checks from a memory dump.
+- Syscall latch points in `unix_syscall_entry`: `_spr_sys_enter_no`
+  snapshots the syscall number on entry, `_spr_sys_exit_no` and
+  `_spr_sys_exit_err` snapshot `u_callno`/`u_error` right after
+  `_unix_syscall` returns, before remapping back to user.
+- Exec handoff snapshots now also include:
+  - `_sprinter_last_exec_entry[16]` - 16 bytes read back from
+    `progload + a_entry`
+  - `_sprinter_last_exec_isp` - user SP handed to `doexec()`
+  - `_sprinter_last_exec_stack[16]` - 16 bytes read back from user stack
+    at `u_isp`
+
+### Current handoff state
+
+Current best-known state for Sprinter bring-up:
+
+- Kernel boots reliably to:
+  - `Devboot`
+  - `OK`
+  - `Starting /init`
+- Visible proof of userspace handoff works: the kernel now prints
+  `SPRINTER RAW USER PROBE` before `doexec()`, and that message appears on
+  screen.
+- This confirms the following now work well enough to reach userland:
+  - `execve()` setup path
+  - userspace page-map handoff
+  - `doexec()` entry jump itself
+
+What is still broken:
+
+- Userspace does not stay alive after entry.
+- Even with the current minimal raw probe / asm-only `/init` override, the
+  process quickly runs into garbage or halts instead of remaining in its
+  intended loop.
+- Recent dumps show user PCs wandering into upper user RAM (`0x95xx`,
+  `0xD9xx`) or low low-page vector space (`0x0038/0x003B`) depending on the
+  exact build stage; after the latest low-page fix, the dominant symptom is
+  that the process enters userspace and then loses control flow shortly
+  afterwards.
+
+Key fixes landed this session:
+
+1. `program_vectors()` on Sprinter no longer zero-fills `0x0000..0x007F`.
+   It now only patches the required vector slots.  This was a real bug: the
+   old behaviour destroyed low-address userspace code/data.
+2. `exec_or_die()` has a temporary `CONFIG_SPRINTER_EARLY_TRACE` fallback that
+   bypasses filesystem/libc init and jumps into a minimal raw userspace probe.
+3. A Sprinter-only package override exists in
+   `fuzix-platform-sprinter.pkg`; latest variant points `/init` to
+   `Applications/util/sprinit0` (pure asm probe), although the raw probe in
+   `exec_or_die()` is now the more important bring-up path.
+4. Userspace signal delivery remains disabled for bring-up in
+   `lowlevel-z80-banked.s` to avoid dropping PID 1 into the signal trampoline.
+
+What the latest evidence means:
+
+- Loader corruption is no longer the primary blocker.
+- Initial `argc/argv` stack setup was validated earlier and is not the first
+  failing point anymore.
+- The remaining bug is almost certainly in the bare kernel->userspace runtime
+  environment after entry, not in pathname lookup or shell/init complexity.
+
+Most likely next investigation steps:
+
+1. Instrument the raw userspace probe path more directly:
+   - snapshot the exact bytes at `PROGLOAD..PROGLOAD+15` immediately before
+     `doexec(PROGLOAD)`
+   - snapshot the same bytes again after the first return-to-kernel event
+     (if any)
+2. Compare Sprinter `doexec()` / user-return contract against a known-good
+   banked Z80 target at the exact boundary where control first enters user
+   space.
+3. Verify whether low-page vectors (`0x0000`, `0x0030`, `0x0038`, `0x0066`)
+   must live somewhere else entirely for Sprinter userspace, instead of being
+   placed inside the user image address space.
+4. Once the raw probe stays alive, remove the bypass and retry `sprinit0`,
+   then `/bin/sh`, then the real `Applications/util/init`.
 
 ### Rebuild Command
 
@@ -468,20 +952,18 @@ Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.
 
 ### Next targets
 
-1. **Find the refcount offender in `i_deref` on `dev=1 num=0x32`.**
-   Add per-`c_num` i_ref/i_deref tracing (guarded by
-   `CONFIG_SPRINTER_EARLY_TRACE`) and replay the real-init boot.
-   Each `++c_refs` and `--c_refs` should record the caller address;
-   diff the log to find the extra `--`.  Do the fix in core FUZIX
-   only if the bug truly cannot be contained in platform glue.
-2. Re-enable `/etc/inittab` (and `/etc/mtab` once `i_deref` is fixed)
-   in `fuzix-basefs.pkg`, then wire `/bin/sh` into the inittab respawn
-   so the console drops into a shell.
-3. Re-enable disk writes (`bdwrite`, `_devide_write_data`) once PID 1
-   is stable.  Run `make clean && make diskimage TARGET=sprinter`
-   afterwards to confirm the image still boots with writes live.
-4. Replace the bring-up `sprinter_bringup_int` with the stock FUZIX
-   `interrupt_handler` exit path (`EI; RETI`) once the ULA FRAME
-   interrupt acknowledge is understood.
-5. Strip the `CONFIG_SPRINTER_EARLY_TRACE` diagnostics (task #5).
-6. FDD (WD1793) + floppy boot path.
+1. **Keep the raw userspace probe alive.**
+   This is now the shortest path to a real milestone: stable user execution
+   after `doexec()`.
+2. Revisit vector placement / low-page contract for Sprinter userspace.
+   The remaining failures still smell like a low-address runtime contract
+   mismatch.
+3. Once the raw probe is stable, retry `sprinit0`, then `/bin/sh`, then the
+   real `Applications/util/init`.
+4. Only after PID 1 is truly stable: re-enable disk writes (`bdwrite`,
+   `_devide_write_data`) and later restore stock signal delivery.
+5. Replace the bring-up `sprinter_bringup_int` with the stock FUZIX
+   `interrupt_handler` exit path (`EI; RETI`) once the ULA FRAME interrupt
+   acknowledge is understood.
+6. Strip the `CONFIG_SPRINTER_EARLY_TRACE` diagnostics in the final cleanup.
+7. FDD (WD1793) + floppy boot path.

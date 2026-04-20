@@ -4,5 +4,9 @@ package platform-sprinter
 # the disk image for the Sprinter target.
 disable-pkg platform-sprinter
 
-# No platform-specific overrides needed for now.
-# The Sprinter has 4MB RAM and runs standard Z80 binaries.
+# Temporary bring-up override: boot into a tiny Sprinter-only userspace probe
+# instead of the full SysV-style /init. Current probe is a pure Z80 assembly
+# binary with no libc/crt0 dependencies, used to validate the bare
+# kernel->userspace transition without any syscall/runtime complexity.
+r /init
+f 0755 /init          ../../../Applications/util/sprinit0

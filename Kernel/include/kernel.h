@@ -1026,6 +1026,12 @@ extern int_fast8_t uf_alloc_n(uint_fast8_t n);
 extern void i_deref(inoptr ino);
 extern void corrupt_fs(uint16_t devno);
 extern void wr_inode(inoptr ino);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void sprinter_wr_inode(inoptr ino, uint8_t site);
+#define WR_INODE(site, ino) sprinter_wr_inode((ino), (site))
+#else
+#define WR_INODE(site, ino) wr_inode(ino)
+#endif
 extern bool isdevice(inoptr ino);
 extern int f_trunc_blocks(inoptr ino, uint16_t nblock);
 extern int f_trunc(inoptr ino);
@@ -1320,5 +1326,3 @@ extern arg_t _ftruncate(void);    /* FUZIX system call 67 */
 #endif
 
 #endif /* __FUZIX__KERNEL_DOT_H__ */
-
-

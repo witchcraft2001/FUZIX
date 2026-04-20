@@ -116,7 +116,13 @@ void readi(regptr inoptr ino, uint_fast8_t flag)
 #else
 			/* FIXME: if we ran a bfind then we should hint bread to avoid a
 			   second pointless walk */
-			if (pblk != NULLBLK && (bp = bfind(dev, pblk)) == NULL && !ispipe && amount == BLKSIZE && read_direct(major(dev), flag)) {
+			if (pblk != NULLBLK && (bp = bfind(dev, pblk)) == NULL && !ispipe && amount == BLKSIZE
+			#ifdef CONFIG_SPRINTER_EARLY_TRACE
+				&& 0
+			#else
+				&& read_direct(major(dev), flag)
+			#endif
+			) {
 				/* we can transfer direct from disk to the userspace buffer */
 				/* FIXME: allow for async queued I/O here. We want
 				   an API something like breadasync() that either
@@ -377,7 +383,7 @@ void sync(void)
 
 	for (ino = i_tab; ino < i_tab + ITABSIZE; ++ino)
 		if (ino->c_refs > 0 && (ino->c_flags & CDIRTY)) {
-			wr_inode(ino);
+			WR_INODE(61, ino);
 			ino->c_flags &= ~CDIRTY;
 		}
 	for (m = fs_tab; m < fs_tab + NMOUNTS; m++) {

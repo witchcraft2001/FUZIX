@@ -112,8 +112,8 @@ arg_t _rename(void)
 	}
 	/* get it onto disk - probably overkill */
 	i_unlock(srcp);
-	wr_inode(dstp);
-	wr_inode(srcp);
+	WR_INODE(31, dstp);
+	WR_INODE(32, srcp);
 	sync();
 	ret = 0;
       nogood2:
@@ -180,7 +180,7 @@ arg_t _mkdir(void)
 	parent->c_node.i_nlink++;
 	ino->c_node.i_mode = ((mode & ~udata.u_mask) & MODE_MASK) | F_DIR;
 	i_deref(parent);
-	wr_inode(ino);
+	WR_INODE(33, ino);
 	i_unlock_deref(ino);
 	return (0);
 
@@ -188,7 +188,7 @@ cleanup:
 	/* We need to unlock inode before we are allowed to lock the parent */
 	/* i_deref will put the blocks */
 	ino->c_node.i_nlink = 0;
-	wr_inode(ino);
+	WR_INODE(34, ino);
 	i_unlock_deref(ino);
 	/* In the error case it may be observed but it's consistently empty */
 	i_lock(parent);
@@ -277,8 +277,8 @@ arg_t _rmdir(void)
 	   only final de-reference as a user might have a cwd set here and
 	   would have access to the invalid . and .. */
 	f_trunc(ino);
-	wr_inode(parent);
-	wr_inode(ino);
+	WR_INODE(35, parent);
+	WR_INODE(36, ino);
 	i_unlock_deref(parent);
 	i_unlock_deref(ino);
 	return (0);

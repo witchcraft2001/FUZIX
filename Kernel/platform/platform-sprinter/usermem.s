@@ -24,6 +24,7 @@
 
 	.globl _udata
 
+	.globl map_kernel
 	.globl  map_proc_save_u
 	.globl  map_kernel_restore_u
 
@@ -168,10 +169,10 @@ user_map_de:
 	ld a, (hl)
 	cp #0x08
 	jr c, user_map_de_b1_bad
-	cp #0x80
+	cp #0x50
 	jr c, user_map_de_b1_ok
 user_map_de_b1_bad:
-	ld a, #0x49
+	ld a, #0x08
 user_map_de_b1_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a
@@ -179,10 +180,10 @@ user_map_de_b1_ok:
 	ld a, (hl)
 	cp #0x08
 	jr c, user_map_de_b2_bad
-	cp #0x80
+	cp #0x50
 	jr c, user_map_de_b2_ok
 user_map_de_b2_bad:
-	ld a, #0x4A
+	ld a, #0x09
 user_map_de_b2_ok:
 	ld (mpgsel_cache + 2), a
 	out (MPGSEL_2), a
@@ -201,23 +202,15 @@ __uput:
 	push ix
 	ld ix, #0
 	add ix, sp
-	call uputget_put
-	ld a, h
-	cp #0xC0
-	jr c, uput_slow
-	call map_proc_save_u
+	call uputget_put		; source in HL, dest in DE, count in BC
 uput_next:
-	jr z, uput_fast_out
-
+	jr z, uput_out
 	ld a, b
 	and #0xC0
 	jr nz, uput_large
-
 	call user_map_de
-copy_and_out:
 	ldir
-	uput_fast_out:
-	call map_kernel_restore_u
+	call map_kernel
 uput_out:
 	pop ix
 	ld hl, #0
@@ -229,8 +222,8 @@ uput_large:
 	call user_map_de
 	ld bc, #0x4000
 	ldir
-	pop bc
 	pop de
+	pop bc
 	ld a, d
 	add #0x40
 	ld d, a
@@ -240,42 +233,6 @@ uput_large:
 	or c
 	jr uput_next
 
-uput_slow:
-	ld a, b
-	or c
-	jr z, uput_out
-uput_slow_loop:
-	ld a, b
-	or c
-	jr z, uput_out
-	ld a, (hl)
-	inc hl
-	push hl
-	push bc
-	push de
-	push af			; stash the source byte on the stack
-	call map_proc_save_u
-	; user_map_de trashes A (it recomputes A to the remapped
-	; destination high byte 0x40..0x7F and leaves the same value
-	; in D).  Call it first, THEN restore the source byte into A
-	; so the `ld (hl), a` below writes the right thing.  The
-	; earlier ordering (`pop af` before `call user_map_de`) was
-	; why every user-memory byte landed as (addr_high & 0x3F) | 0x40
-	; -- e.g. 0x76 at 0x3600, 0x41 at 0x0112 -- which parsed as
-	; HALT instructions and jammed /init on entry.
-	call user_map_de	; DE -> remapped dest, WIN1/WIN2 set for user
-	ld h, d
-	ld l, e
-	pop af			; A = source byte
-	ld (hl), a
-	pop de
-	call map_kernel_restore_u
-	inc de
-	pop bc
-	pop hl
-	dec bc
-	jr uput_slow_loop
-
 ;
 ;	Copy data from user space
 ;
@@ -283,19 +240,18 @@ __uget:
 	push ix
 	ld ix, #0
 	add ix, sp
-	call map_proc_save_u
-	call uputget
+	call uputget			; source in HL, dest in DE, count in BC
 uget_next:
 	jr z, uput_out
-
 	ld a, b
 	and #0xC0
 	jr nz, uget_large
-
 	ex de, hl
 	call user_map_de
 	ex de, hl
-	jr copy_and_out
+	ldir
+	call map_kernel
+	jr uput_out
 
 uget_large:
 	push bc
@@ -305,8 +261,8 @@ uget_large:
 	ex de, hl
 	ld bc, #0x4000
 	ldir
-	pop bc
 	pop hl
+	pop bc
 	ld a, h
 	add #0x40
 	ld h, a

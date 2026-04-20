@@ -28,6 +28,7 @@ SRCSNS = \
 	rm.c \
 	rmdir.c \
 	substroot.c \
+	sprinit.c \
 	sum.c \
 	sync.c \
 	tee.c \

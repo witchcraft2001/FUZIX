@@ -132,7 +132,7 @@ uint8_t write_core_image(void)
 		if ((ino = newfile(parent, (uint8_t *)"core")) != NULL) {
 			ino->c_node.i_mode = F_REG | 0400;
 			setftime(ino, A_TIME | M_TIME | C_TIME);
-			wr_inode(ino);
+			WR_INODE(51, ino);
 			f_trunc(ino);
 			/* Write the header */
 			corehdr.ch_base = (uptr_t)udata.u_codebase;
