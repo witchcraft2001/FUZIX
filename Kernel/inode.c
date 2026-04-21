@@ -4,6 +4,16 @@
 #include <tty.h>
 #include <netdev.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_rw_fd;
+extern uint16_t spr_rw_base;
+extern uint16_t spr_rw_count;
+extern uint8_t spr_rw_access;
+extern uint16_t spr_rw_mode;
+extern uint16_t spr_rw_dev;
+#endif
+
 #if defined(CONFIG_LARGE_IO_DIRECT)
 #define read_direct(dev, flag)		(!udata.u_sysio && CONFIG_LARGE_IO_DIRECT(dev))
 #elif (NBUFS >= 32)
@@ -259,7 +269,20 @@ void writei(regptr inoptr ino, uint_fast8_t flag)
 		break;
 
 	case MODE_R(F_CDEV):
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 0xC1;
+		spr_rw_fd = (uint8_t)flag;
+		spr_rw_base = ino->c_node.i_addr[0];
+		spr_rw_count = (uint16_t)udata.u_count;
+		spr_rw_access = 0;
+		spr_rw_mode = ino->c_node.i_mode;
+		spr_rw_dev = ino->c_dev;
+#endif
 		udata.u_done = cdwrite(ino->c_node.i_addr[0], flag);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 0xC2;
+		spr_rw_count = (uint16_t)udata.u_done;
+#endif
 		break;
 	default:
 		udata.u_error = ENODEV;
@@ -314,16 +337,37 @@ inoptr rwsetup(bool is_read, uint_fast8_t * flag)
 	udata.u_sysio = false;	/* I/O to user data space */
 	udata.u_base = (unsigned char *) udata.u_argn1;	/* buf */
 	udata.u_count = (susize_t) udata.u_argn2;	/* nbytes */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 1;
+	spr_rw_fd = (uint8_t)udata.u_argn;
+	spr_rw_base = (uint16_t)(uarg_t)udata.u_base;
+	spr_rw_count = (uint16_t)udata.u_count;
+	spr_rw_access = 0xFF;
+	spr_rw_mode = 0xFFFF;
+	spr_rw_dev = 0xFFFF;
+#endif
 
 	if ((ino = getinode(udata.u_argn)) == NULLINODE) {
 		/* kprintf("[WRS: rwsetup(): getinode(%x) fails]", udata.u_argn); */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 2;
+#endif
 		return (NULLINODE);
 	}
 
 	oftp = of_tab + udata.u_files[udata.u_argn];
 	*flag = oftp->o_access;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 3;
+	spr_rw_access = oftp->o_access;
+	spr_rw_mode = ino->c_node.i_mode;
+	spr_rw_dev = ino->c_node.i_addr[0];
+#endif
 	if (O_ACCMODE(oftp->o_access) == (is_read ? O_WRONLY : O_RDONLY)) {
 		udata.u_error = EBADF;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 4;
+#endif
 		return (NULLINODE);
 	}
 	setftime(ino, is_read ? A_TIME : (A_TIME | M_TIME | C_TIME));
@@ -333,6 +377,9 @@ inoptr rwsetup(bool is_read, uint_fast8_t * flag)
 		oftp->o_ptr = ino->c_node.i_size;
 	/* Initialize u_offset from file pointer */
 	udata.u_offset = oftp->o_ptr;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 5;
+#endif
 	i_lock(ino);
 	return (ino);
 }

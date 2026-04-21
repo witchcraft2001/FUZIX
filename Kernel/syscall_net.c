@@ -15,6 +15,10 @@
 
 extern void netdev_init(void);
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t sprinter_dbg[];
+#endif
+
 #define N_MAKE		0x80
 #define N_SOCKFD	0x40
 #define N_ADDR_IN	0x20
@@ -76,6 +80,13 @@ static int make_socket(uint16_t sock)
 		goto nooft;
 
 	/* We need an inode : FIXME - do we want a pipedev aka Unix ? */
+ #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[10] = 0x37;
+	sprinter_dbg[11] = (uint8_t)root_dev;
+	sprinter_dbg[12] = (uint8_t)(root_dev >> 8);
+	sprinter_dbg[13] = 0;
+	sprinter_dbg[14] = 0;
+#endif
 	if (!(ino = i_open(root_dev, 0)))
 		goto noalloc;
 	/* All good - now set it up */

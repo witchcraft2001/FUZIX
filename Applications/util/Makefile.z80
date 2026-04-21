@@ -1,11 +1,20 @@
-APPOTHER = cpuinfo sprinit0
+APPOTHER = cpuinfo sprinit0 sprinit
 include Makefile.common
+
+OBJSNS := $(filter-out sprinit.o,$(OBJSNS))
+APPSNS := $(filter-out sprinit,$(APPSNS))
 
 cpuinfo: cpuinfo.o cpuinfo-z80.o
 	$(LINKER) -o $@ $(LINKER_OPT) $(CRT0) $^ $(LINKER_TAIL)
 
-sprinit0: sprinit0.o
-	$(LINKER) -o $@ $^
+sprinit: sprinit_raw.s
+	rm -f sprinit.rel sprinit.ihx sprinit.lk sprinit.lst sprinit.sym sprinit.noi sprinit_raw.rel sprinit_raw.ihx sprinit_raw.lk sprinit_raw.lst sprinit_raw.sym sprinit_raw.noi
+	sdasz80 -o sprinit_raw.s
+	sdldz80 -i sprinit_raw.rel
+	makebin -p sprinit_raw.ihx sprinit
 
-sprinit0.o: sprinit0.s
-	sdasz80 -plosgff -o $@ $<
+sprinit0:
+	@:
+
+sprinit0.o:
+	@:

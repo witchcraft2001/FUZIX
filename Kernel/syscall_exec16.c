@@ -6,9 +6,19 @@
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
-extern uint8_t sprinter_last_exec_entry[16];
-extern uint16_t sprinter_last_exec_isp;
-extern uint8_t sprinter_last_exec_stack[16];
+extern uint8_t sprinter_exec_fail_stage;
+extern uint16_t sprinter_exec_fail_err;
+extern uint16_t sprinter_exec_fail_name;
+extern uint16_t sprinter_exec_fail_root;
+extern uint16_t sprinter_exec_fail_cwd;
+extern uint16_t sprinter_exec_fail_ino;
+extern uint16_t sprinter_exec_fail_mode;
+extern uint8_t sprinter_exec_fail_perm;
+extern uint8_t sprinter_exec_fail_mflags;
+extern uint16_t sprinter_exec_fail_argv;
+extern uint16_t sprinter_exec_fail_envp;
+extern uint16_t sprinter_exec_fail_done;
+extern uint16_t sprinter_exec_fail_count;
 #define EX_TRACE(x) plt_trace(x)
 #else
 #define EX_TRACE(x) do { } while (0)
@@ -72,6 +82,7 @@ arg_t _execve(void)
 	staticfast uaddr_t top;
 	uaddr_t bin_size;	/* Will need to be bigger on some cpus */
 	uaddr_t bss;
+	uaddr_t min_bin;
 	uint_fast8_t mflags;
 	uint8_t *exec_name;
 	uarg_t exec_name_ptr;
@@ -89,21 +100,30 @@ arg_t _execve(void)
 	/* Copy the exec path into a dedicated 32-byte kernel buffer that
 	 * does NOT get wrapped out of the circular trace.  Also trace the
 	 * first 6 bytes for short-term visibility. */
+	sprinter_exec_fail_stage = 0;
+	sprinter_exec_fail_err = 0;
+	sprinter_exec_fail_name = exec_name_ptr;
+	sprinter_exec_fail_root = (uint16_t)(uarg_t)udata.u_root;
+	sprinter_exec_fail_cwd = (uint16_t)(uarg_t)udata.u_cwd;
+	sprinter_exec_fail_ino = 0;
+	sprinter_exec_fail_mode = 0;
+	sprinter_exec_fail_perm = 0;
+	sprinter_exec_fail_mflags = 0;
+	sprinter_exec_fail_argv = (uint16_t)(uarg_t)argv;
+	sprinter_exec_fail_envp = (uint16_t)(uarg_t)envp;
+	sprinter_exec_fail_done = 0;
+	sprinter_exec_fail_count = 0;
 	EX_TRACE(0xEF);
 	{
 		uint_fast8_t i;
-		extern uint8_t sprinter_last_exec_path[32];
-		for (i = 0; i < 31; i++) {
+		for (i = 0; i < 6; i++) {
 			uint8_t c = exec_name_ptr
 				? (uint8_t)ugetc((void *)(exec_name_ptr + i))
 				: 0;
-			sprinter_last_exec_path[i] = c;
-			if (i < 6)
-				EX_TRACE(c);
+			EX_TRACE(c);
 			if (c == 0)
 				break;
 		}
-		sprinter_last_exec_path[31] = 0;
 		/* Pad trace to always 6 bytes so alignment is predictable. */
 		while (i < 6) {
 			EX_TRACE(0);
@@ -114,10 +134,15 @@ arg_t _execve(void)
 
 	if (!(ino = n_open_lock(exec_name, NULLINOPTR)))
 	{
+		sprinter_exec_fail_stage = 1;
+		sprinter_exec_fail_err = udata.u_error;
 		EX_TRACE(0xE1);
 		EX_TRACE((uint8_t)udata.u_error);
 		return (-1);
 	}
+	sprinter_exec_fail_ino = (uint16_t)(uarg_t)ino;
+	sprinter_exec_fail_mode = ino->c_node.i_mode;
+	sprinter_exec_fail_perm = getperm(ino);
 
 	EX_TRACE(0xE2);
 	EX_TRACE(0xEE);
@@ -147,14 +172,19 @@ arg_t _execve(void)
 		EX_TRACE((uint8_t)getperm(ino));
 		EX_TRACE((uint8_t)ino->c_node.i_mode);
 		EX_TRACE((uint8_t)(ino->c_node.i_mode >> 8));
+		sprinter_exec_fail_stage = 2;
+		sprinter_exec_fail_err = EACCES;
 		udata.u_error = EACCES;
 		goto nogood;
 	}
 
 	mflags = fs_tab[ino->c_super].m_flags;
+	sprinter_exec_fail_mflags = mflags;
 	if (mflags & MS_NOEXEC) {
 		EX_TRACE(0xE4);
 		EX_TRACE((uint8_t)mflags);
+		sprinter_exec_fail_stage = 3;
+		sprinter_exec_fail_err = EACCES;
 		udata.u_error = EACCES;
 		goto nogood;
 	}
@@ -167,14 +197,6 @@ arg_t _execve(void)
 	udata.u_sysio = true;
 
 	readi(ino, 0);
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	{
-		extern uint8_t sprinter_last_exec_hdr[16];
-		uint_fast8_t i;
-		for (i = 0; i < sizeof(struct exec); i++)
-			sprinter_last_exec_hdr[i] = ((uint8_t *)&hdr)[i];
-	}
-#endif
 	EX_TRACE(0xED);
 	EX_TRACE((uint8_t)udata.u_done);
 	EX_TRACE((uint8_t)(((uarg_t)udata.u_done) >> 8));
@@ -183,12 +205,16 @@ arg_t _execve(void)
 	EX_TRACE(((uint8_t *)&hdr)[2]);
 	EX_TRACE(((uint8_t *)&hdr)[3]);
 	if (udata.u_done != sizeof(struct exec)) {
+		sprinter_exec_fail_stage = 4;
+		sprinter_exec_fail_err = ENOEXEC;
 		udata.u_error = ENOEXEC;
 		goto nogood;
 	}
 
 	if (!header_ok(&hdr)) {
 		EX_TRACE(0xF1);
+		sprinter_exec_fail_stage = 5;
+		sprinter_exec_fail_err = ENOEXEC;
 		udata.u_error = ENOEXEC;
 		goto nogood2;
 	}
@@ -197,6 +223,8 @@ arg_t _execve(void)
 	if (pagemap_prepare(&hdr) < 0)
 	{
 		EX_TRACE(0xF3);
+		sprinter_exec_fail_stage = 6;
+		sprinter_exec_fail_err = udata.u_error;
 		goto nogood2;
 	}
 	EX_TRACE(0xF4);
@@ -210,23 +238,43 @@ arg_t _execve(void)
 
 	/* top can overflow. We check below */
 	bss = hdr.a_bss;
+	min_bin = 64;
 
 	bin_size = hdr.a_text + hdr.a_data;
 	/* Does it fit ? */
 	if (bin_size < hdr.a_text || top < progload || bin_size + bss < bin_size) {
 		EX_TRACE(0xF5);
+		sprinter_exec_fail_stage = 7;
+		sprinter_exec_fail_err = ENOMEM;
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
 #ifdef DP_SIZE
 	if (hdr.a_zp > DP_SIZE) {
+		sprinter_exec_fail_stage = 14;
+		sprinter_exec_fail_err = ENOMEM;
+		sprinter_exec_fail_done = hdr.a_zp;
+		sprinter_exec_fail_count = DP_SIZE;
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
 #endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* Sprinter bring-up uses a tiny pure-asm /init probe (sprinit0).
+	 * It is a valid exec16 image whose text+data is only 24 bytes, and
+	 * the real hard floor here is the 16-byte header overwritten by
+	 * sys_stubs, not the historical 64-byte heuristic. Keep the relax
+	 * local to early-trace builds until the full init path is stable. */
+	min_bin = sizeof(struct exec);
+#endif
 	progptr = bin_size + 1024 + bss;
-	if (bin_size < 64 || progload < PROGLOAD || top - progload < progptr || progptr < bin_size) {
+	if (bin_size < min_bin || progload < PROGLOAD ||
+	    top - progload < progptr || progptr < bin_size) {
 		EX_TRACE(0xF6);
+		sprinter_exec_fail_stage = 15;
+		sprinter_exec_fail_err = ENOMEM;
+		sprinter_exec_fail_done = (uint16_t)bin_size;
+		sprinter_exec_fail_count = (uint16_t)progptr;
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
@@ -244,9 +292,18 @@ arg_t _execve(void)
 	ebuf = (struct s_argblk *) tmpbuf();
 
 	/* Read args and environment from process memory */
-	if (rargs(argv, abuf) || rargs(envp, ebuf))
+	if (rargs(argv, abuf))
 	{
 		EX_TRACE(0xF7);
+		sprinter_exec_fail_stage = 8;
+		sprinter_exec_fail_err = udata.u_error;
+		goto nogood3;	/* SN */
+	}
+	if (rargs(envp, ebuf))
+	{
+		EX_TRACE(0xF7);
+		sprinter_exec_fail_stage = 9;
+		sprinter_exec_fail_err = udata.u_error;
 		goto nogood3;	/* SN */
 	}
 	EX_TRACE(0xF8);
@@ -257,6 +314,8 @@ arg_t _execve(void)
 	if (pagemap_realloc(&hdr, top - MAPBASE))
 	{
 		EX_TRACE(0xF9);
+		sprinter_exec_fail_stage = 10;
+		sprinter_exec_fail_err = udata.u_error;
 		goto nogood3;
 	}
 	EX_TRACE(0xFA);
@@ -328,6 +387,10 @@ arg_t _execve(void)
 		va = valaddr_r(udata.u_base, udata.u_count);
 		if (va != udata.u_count) {
 			EX_TRACE(0xFB);
+			sprinter_exec_fail_stage = 11;
+			sprinter_exec_fail_err = udata.u_error;
+			sprinter_exec_fail_done = (uint16_t)va;
+			sprinter_exec_fail_count = (uint16_t)udata.u_count;
 			goto nogood4;
 		}
 	}
@@ -342,6 +405,10 @@ arg_t _execve(void)
 		EX_TRACE((uint8_t)(((uarg_t)bin_size) >> 8));
 		EX_TRACE(0xCF);
 		EX_TRACE((uint8_t)udata.u_error);
+		sprinter_exec_fail_stage = 12;
+		sprinter_exec_fail_err = udata.u_error;
+		sprinter_exec_fail_done = (uint16_t)udata.u_done;
+		sprinter_exec_fail_count = (uint16_t)bin_size;
 		goto nogood4;
 	}
 	EX_TRACE(0xFD);
@@ -407,11 +474,6 @@ arg_t _execve(void)
 	EX_TRACE((uint8_t)(((uarg_t)udata.u_isp) >> 8));
 	EX_TRACE((uint8_t)top);
 	EX_TRACE((uint8_t)(top >> 8));
-	sprinter_last_exec_isp = (uint16_t)(uarg_t)udata.u_isp;
-	uget((void *)(progload + hdr.a_entry), sprinter_last_exec_entry,
-		sizeof(sprinter_last_exec_entry));
-	uget((void *)udata.u_isp, sprinter_last_exec_stack,
-		sizeof(sprinter_last_exec_stack));
 #endif
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
@@ -426,6 +488,10 @@ arg_t _execve(void)
 	/* Start execution (never returns) */
 	udata.u_ptab->p_status = P_RUNNING;
 	doexec(progload + hdr.a_entry);
+	sprinter_exec_fail_stage = 13;
+	sprinter_exec_fail_err = 0;
+	sprinter_exec_fail_done = (uint16_t)(progload + hdr.a_entry);
+	sprinter_exec_fail_count = (uint16_t)(uarg_t)udata.u_isp;
 
 	/* tidy up in various failure modes */
 nogood4:

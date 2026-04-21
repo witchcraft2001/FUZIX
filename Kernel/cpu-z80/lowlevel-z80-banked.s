@@ -62,11 +62,28 @@
         .globl _plt_trace
 	.globl _sprinter_nullh_count
 	.globl _spr_sys_enter_no
+	.globl _spr_sys_enter_up0
+	.globl _spr_sys_enter_up1
+	.globl _spr_sys_enter_up2
+	.globl _spr_sys_enter_pp0
+	.globl _spr_sys_enter_pp1
+	.globl _spr_sys_enter_pp2
+	.globl _spr_sys_enter_ptab
+	.globl _spr_sys_enter_fixup
 	.globl _spr_sys_exit_no
 	.globl _spr_sys_exit_err
 	.globl _spr_sys_exit_up0
 	.globl _spr_sys_exit_up1
 	.globl _spr_sys_exit_up2
+	.globl _spr_sys_exit_pp0
+	.globl _spr_sys_exit_pp1
+	.globl _spr_sys_exit_pp2
+	.globl _spr_sys_exit_ptab
+	.globl _spr_sys_fixup
+	.globl _spr_sysarg_sp
+	.globl _sprinter_last_exec_ptab
+	.globl _ptab
+	.globl mpgsel_cache
         .globl _unix_syscall
         .globl outstring
         .globl kstack_top
@@ -149,13 +166,103 @@ unix_syscall_entry:
         push iy
 	; We don't save AF / AF' / DE / HL. We do save BC because the 8080 user
 	; space will care about that when we unify them.
+	ld c, a
+	ld hl, #12
+	add hl, sp
+	ld (_spr_sysarg_sp), hl
 
-        ; locate function call arguments on the userspace stack
-        ld hl, #16     ; 12 bytes machine state, plus 2 x 2 bytes return address
-        add hl, sp
+	ld a, c
+	xor a
+	ld (_spr_sys_enter_fixup), a
+	; Sprinter bring-up: PID1 can reach its first syscall with
+	; udata.u_ptab already zeroed. Recover it from ptab[0] so
+	; we can observe the next real failure instead of falling
+	; straight into fallback user pages.
+	ld de, (_udata + U_DATA__U_PTAB)
+	ld a, d
+	or e
+	jr nz, syscall_ptab_ok
+	ld a, #1
+	ld (_spr_sys_enter_fixup), a
+	ld de, #_ptab
+	ld (_udata + U_DATA__U_PTAB), de
+	ld hl, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 1), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 2), a
+	inc hl
+	ld a, (hl)
+	ld (_udata + U_DATA__U_PAGE + 3), a
+syscall_ptab_ok:
+	ld hl, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld a, (hl)
+	cp #0x08
+	jr c, syscall_fix_pages
+	cp #0x50
+	jr nc, syscall_fix_pages
+	inc hl
+	ld a, (hl)
+	cp #0x08
+	jr c, syscall_fix_pages
+	cp #0x50
+	jr nc, syscall_fix_pages
+	inc hl
+	ld a, (hl)
+	cp #0x08
+	jr c, syscall_fix_pages
+	cp #0x50
+	jr c, syscall_pages_ok
+syscall_fix_pages:
+	ld a, #2
+	ld (_spr_sys_enter_fixup), a
+	ld hl, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld a, (mpgsel_cache)
+	ld (hl), a
+	ld (_udata + U_DATA__U_PAGE), a
+	inc hl
+	ld a, (mpgsel_cache + 1)
+	ld (hl), a
+	ld (_udata + U_DATA__U_PAGE + 1), a
+	inc hl
+	ld a, (mpgsel_cache + 2)
+	ld (hl), a
+	ld (_udata + U_DATA__U_PAGE + 2), a
+	inc hl
+	ld a, (mpgsel_cache + 3)
+	ld (hl), a
+	ld (_udata + U_DATA__U_PAGE + 3), a
+syscall_pages_ok:
+	ld a, c
         ; save system call number
         ld (_udata + U_DATA__U_CALLNO), a
 	ld (_spr_sys_enter_no), a
+	ld a, (_udata + U_DATA__U_PAGE)
+	ld (_spr_sys_enter_up0), a
+	ld a, (_udata + U_DATA__U_PAGE + 1)
+	ld (_spr_sys_enter_up1), a
+	ld a, (_udata + U_DATA__U_PAGE + 2)
+	ld (_spr_sys_enter_up2), a
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld (_spr_sys_enter_ptab), hl
+	ld a, (mpgsel_cache)
+	ld (_spr_sys_enter_pp0), a
+	ld a, (mpgsel_cache + 1)
+	ld (_spr_sys_enter_pp1), a
+	ld a, (mpgsel_cache + 2)
+	ld (_spr_sys_enter_pp2), a
+        ; locate function call arguments on the userspace stack
+        ; after the register saves the original entry SP is at SP+12,
+        ; and syscall args begin four bytes above that.
+        ld hl, #16
+        add hl, sp
         ; advance to syscall arguments
         ; copy arguments to common memory
         ld de, #_udata + U_DATA__U_ARGN
@@ -208,6 +315,64 @@ unix_syscall_entry:
 	ld (_spr_sys_exit_up1), a
 	ld a, (_udata + U_DATA__U_PAGE + 2)
 	ld (_spr_sys_exit_up2), a
+	xor a
+	ld (_spr_sys_fixup), a
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld (_spr_sys_exit_ptab), hl
+	ld de, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld a, (hl)
+	ld (_spr_sys_exit_pp0), a
+	inc hl
+	ld a, (hl)
+	ld (_spr_sys_exit_pp1), a
+	inc hl
+	ld a, (hl)
+	ld (_spr_sys_exit_pp2), a
+	ld a, (_spr_sys_exit_pp0)
+	cp #0x08
+	jr c, spr_fix_ptab_from_exec
+	cp #0x50
+	jr nc, spr_fix_ptab_from_exec
+	ld a, (_spr_sys_exit_pp1)
+	cp #0x08
+	jr c, spr_fix_ptab_from_exec
+	cp #0x50
+	jr nc, spr_fix_ptab_from_exec
+	ld a, (_spr_sys_exit_pp2)
+	cp #0x08
+	jr c, spr_fix_ptab_from_exec
+	cp #0x50
+	jr c, spr_ptab_ok
+spr_fix_ptab_from_exec:
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld de, #P_TAB__P_PID_OFFSET
+	add hl, de
+	ld a, (hl)
+	cp #1
+	jr nz, spr_ptab_ok
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld de, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld de, #_sprinter_last_exec_ptab
+	ld a, (de)
+	ld (hl), a
+	ld (_spr_sys_exit_pp0), a
+	inc hl
+	inc de
+	ld a, (de)
+	ld (hl), a
+	ld (_spr_sys_exit_pp1), a
+	inc hl
+	inc de
+	ld a, (de)
+	ld (hl), a
+	ld (_spr_sys_exit_pp2), a
+	inc hl
+	inc de
+	ld a, (de)
+	ld (hl), a
+spr_ptab_ok:
 
 	; If u_page[] got clobbered, rebuild it from current ptab entry
 	; before mapping back to user. This avoids returning with
@@ -228,6 +393,8 @@ unix_syscall_entry:
 	cp #0x50
 	jr c, spr_upage_ok
 spr_fix_upage:
+	ld a, #1
+	ld (_spr_sys_fixup), a
 	ld hl, (_udata + U_DATA__U_PTAB)
 	ld de, #P_TAB__P_PAGE_OFFSET
 	add hl, de
@@ -243,8 +410,6 @@ spr_fix_upage:
 	ld a, (hl)
 	ld (_udata + U_DATA__U_PAGE + 3), a
 spr_upage_ok:
-
-
 	call map_proc_always
 
 	xor a
@@ -283,13 +448,13 @@ unix_pop:
         pop iy
         pop ix
 	pop bc
-        ; pop af ;; WRS: skip this!
         exx
         pop hl
         pop de
         pop bc
         exx
-	 ret
+        ei
+	 ret ; must immediately follow EI
 
 
 via_signal:
@@ -335,6 +500,7 @@ _doexec:
         call map_proc_always
 
         pop bc ; return address
+        pop af ; sdcc banked/noopt saves AF before the call
         pop de ; start address
 
         ld hl, (_udata + U_DATA__U_ISP)

@@ -5,8 +5,8 @@ package platform-sprinter
 disable-pkg platform-sprinter
 
 # Temporary bring-up override: boot into a tiny Sprinter-only userspace probe
-# instead of the full SysV-style /init. Current probe is a pure Z80 assembly
-# binary with no libc/crt0 dependencies, used to validate the bare
-# kernel->userspace transition without any syscall/runtime complexity.
+# instead of the full SysV-style /init. Current probe is a tiny C binary that
+# performs one minimal syscall and then loops, used to validate the first
+# user->kernel->user round-trip without dragging in full init/stdio logic.
 r /init
-f 0755 /init          ../../../Applications/util/sprinit0
+f 0755 /init          ../../../Applications/util/sprinit

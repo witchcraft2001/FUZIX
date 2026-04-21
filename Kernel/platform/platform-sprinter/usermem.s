@@ -203,35 +203,32 @@ __uput:
 	ld ix, #0
 	add ix, sp
 	call uputget_put		; source in HL, dest in DE, count in BC
-uput_next:
 	jr z, uput_out
+
+uput_l:
+	ld a, (hl)
+	inc hl
+	push bc
+	push hl
+	push af
+	ex de, hl
+	call map_proc_save_u
+	pop af
+	ld (hl), a
+	call map_kernel_restore_u
+	ex de, hl
+	pop hl
+	pop bc
+	inc de
+	dec bc
 	ld a, b
-	and #0xC0
-	jr nz, uput_large
-	call user_map_de
-	ldir
-	call map_kernel
+	or c
+	jr nz, uput_l
+
 uput_out:
 	pop ix
 	ld hl, #0
 	ret
-
-uput_large:
-	push bc
-	push de
-	call user_map_de
-	ld bc, #0x4000
-	ldir
-	pop de
-	pop bc
-	ld a, d
-	add #0x40
-	ld d, a
-	ld a, b
-	sub #0x40
-	ld b, a
-	or c
-	jr uput_next
 
 ;
 ;	Copy data from user space
@@ -241,33 +238,23 @@ __uget:
 	ld ix, #0
 	add ix, sp
 	call uputget			; source in HL, dest in DE, count in BC
-uget_next:
 	jr z, uput_out
-	ld a, b
-	and #0xC0
-	jr nz, uget_large
-	ex de, hl
-	call user_map_de
-	ex de, hl
-	ldir
-	call map_kernel
-	jr uput_out
 
-uget_large:
+uget_l:
 	push bc
-	push hl
-	ex de, hl
-	call user_map_de
-	ex de, hl
-	ld bc, #0x4000
-	ldir
-	pop hl
+	push de
+	call map_proc_save_u
+	ld a, (hl)
+	inc hl
+	push af
+	call map_kernel_restore_u
+	pop af
+	pop de
 	pop bc
-	ld a, h
-	add #0x40
-	ld h, a
+	ld (de), a
+	inc de
+	dec bc
 	ld a, b
-	sub #0x40
-	ld b, a
 	or c
-	jr uget_next
+	jr nz, uget_l
+	jr uput_out

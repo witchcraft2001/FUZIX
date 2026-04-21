@@ -6,20 +6,19 @@
 #include <kdata.h>
 #include <printf.h>
 #include <devsys.h>
+#include <tty.h>
 #include <devtty.h>
 #include <tinyide.h>
 #define _TINYDISK_PRIVATE
 #include <tinydisk.h>
 
 extern void plt_trace(uint8_t code);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void pagemap_reset_pool(void);
+#endif
 
-void init_hardware_c(void)
+void sprinter_restore_devsw(void)
 {
-}
-
-void device_init(void)
-{
-	/* Runtime re-init of dev_tab for bring-up diagnostics. */
 	dev_tab[0].dev_open = no_open;
 	dev_tab[0].dev_close = no_close;
 	dev_tab[0].dev_read = td_read;
@@ -32,17 +31,36 @@ void device_init(void)
 	dev_tab[1].dev_write = no_rdwr;
 	dev_tab[1].dev_ioctl = no_ioctl;
 
-	dev_tab[2].dev_open = no_open;
-	dev_tab[2].dev_close = no_close;
-	dev_tab[2].dev_read = no_rdwr;
-	dev_tab[2].dev_write = no_rdwr;
-	dev_tab[2].dev_ioctl = no_ioctl;
+	dev_tab[2].dev_open = tty_open;
+	dev_tab[2].dev_close = tty_close;
+	dev_tab[2].dev_read = tty_read;
+	dev_tab[2].dev_write = tty_write;
+	dev_tab[2].dev_ioctl = tty_ioctl;
 
 	dev_tab[3].dev_open = no_open;
 	dev_tab[3].dev_close = no_close;
 	dev_tab[3].dev_read = no_rdwr;
 	dev_tab[3].dev_write = no_rdwr;
 	dev_tab[3].dev_ioctl = no_ioctl;
+
+	dev_tab[4].dev_open = no_open;
+	dev_tab[4].dev_close = no_close;
+	dev_tab[4].dev_read = sys_read;
+	dev_tab[4].dev_write = sys_write;
+	dev_tab[4].dev_ioctl = sys_ioctl;
+}
+
+void init_hardware_c(void)
+{
+}
+
+void device_init(void)
+{
+	/*
+	 * Keep the static devices.c table for tty and system devices intact.
+	 * Sprinter only needs to wire the block layer hooks here.
+	 */
+	sprinter_restore_devsw();
 
 	plt_trace(0x42);
 
@@ -62,6 +80,9 @@ void device_init(void)
 void pagemap_init(void)
 {
 	uint8_t i;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	pagemap_reset_pool();
+#endif
 	/*
 	 *	Add user pages to the free pool.
 	 *	Kernel uses high pages 0x48-0x4F.

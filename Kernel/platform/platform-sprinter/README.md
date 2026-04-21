@@ -197,6 +197,88 @@ driver now reaches a **stable userland idle state**:
 At this point PID 1 is alive, looping in `pause()`, IRQs are serviced and
 the machine is responsive.  No panic, no `trap_illegal`, no `plt_monitor`.
 
+### Packaging fix: real Sprinter `/init` overlay
+
+The filesystem builder enables `platform-$TARGET` via
+`build-filesystem -p platform-$TARGET`, but the tree had no
+`fuzix-platform-sprinter.pkg`.  As a result, `/init` in the Sprinter image
+still came from `Applications/util/init` via `fuzix-basefs.pkg`, while the
+bring-up work was modifying `Applications/util/sprinit`.
+
+That mismatch explained the repeated "why is the screen not matching the
+current sprinit.s?" loop: the emulator was never booting the diagnostic init
+binary at all.
+
+The fix is to use the existing Sprinter-only package overlay:
+
+```text
+Kernel/platform/platform-sprinter/fuzix-platform-sprinter.pkg
+    r /init
+    f 0755 /init ../../../Applications/util/sprinit
+```
+
+This keeps other targets on the stock `/init` and lets `TARGET=sprinter`
+actually boot the current bring-up PID 1.
+
+### PID1 bootstrap map: avoid one-page init on Sprinter
+
+`create_init()` in core FUZIX normally seeds PID1 with `u_top = PROGLOAD + 512`,
+which means `ptab_alloc()` gives init only a one-page bootstrap map until
+`_execve()` grows it later.
+
+On Sprinter that proved too fragile: the first `/init` handoff was repeatedly
+seen with mixed live mappings like `08/49/4A/49`, followed by `RST 38` into
+`0xFF`-filled user space before the real exec path settled.
+
+Under `CONFIG_SPRINTER_EARLY_TRACE`, PID1 now starts with `u_top = PROGTOP`
+from the outset, forcing a canonical full user page map before the first
+`execve("/init")`.  This is still a temporary bring-up guard and remains a
+compile-time no-op for every other target.
+
+### `sprinit`: bypass `sprcrt0` / libc during bring-up
+
+The current early trap now occurs with a stable PID1 page map
+(`0x40/0x41/0x42/0x43`) and before the first reliable syscall-enter latch
+fires. That moves the suspicion away from the kernel `open()` path and onto
+the user-side startup/runtime glue itself.
+
+### Screen-localised boot markers
+
+The current replay after moving IM2 away from `_COMMONDATA` still traps at
+`F1AC` with a canonical PID1 map (`0x40/0x41/0x42/0x43`) and only the
+banner + `Devboot` visible. Since `_COMMONMEM` now lives at `0xEE00`, the
+old dump ranges around `0xFDxx..0xFFxx` no longer show the relevant trace
+state directly.
+
+To localise the next failure without relying on stale dump addresses,
+`start.c` now emits one-character boot markers under
+`CONFIG_SPRINTER_EARLY_TRACE`:
+
+- `A` after `create_init()`
+- `B` after `device_init()`
+- `C` after successful `fmount(root_dev, ...)`
+- `D` after successful `i_open(root_dev, ROOTINODE)`
+
+That makes the next replay readable from the screen alone and pins the
+first failing stage in the boot path `create_init -> device_init -> fmount
+-> i_open(root) -> OK -> exec_or_die`.
+
+To cut that layer out completely, Sprinter `/init` now builds as a raw
+relocatable FUZIX binary with its own exec header, like `init_minimal.s`,
+instead of linking through `sprcrt0.o`.  The standalone source now lives in
+`Applications/util/sprinit_raw.s` and builds to the packaged binary
+`Applications/util/sprinit`:
+
+- issues syscalls directly via `call 0x0100`,
+- opens `/dev/tty1`,
+- duplicates it to stdin/stdout,
+- calls `execve("/bin/sh", ...)`,
+- prints `SPRINTER EXEC FAIL` only if `execve()` returns.
+
+This removes `sprcrt0` relocation, libc syscall wrappers, and the argc/argv
+startup frame from the PID1 bring-up path.  If the trap disappears, the next
+blocker is the real `/bin/sh` handoff rather than the generic Z80 user CRT.
+
 ### Milestone: stable boot-to-userland (April 2026)
 
 Reached via a sequence of fixes, each of which exposed the next issue:
@@ -926,6 +1008,342 @@ What the latest evidence means:
 - The remaining bug is almost certainly in the bare kernel->userspace runtime
   environment after entry, not in pathname lookup or shell/init complexity.
 
+Latest fix in tree:
+
+- `platform-sprinter/usermem.s` now preserves the transferred byte across
+  `map_proc_save_u()` / `map_kernel_restore_u()` in the byte-at-a-time
+  `__uput/__uget` loops.  The previous "safe" rewrite loaded the byte into
+  `A` and then called the mapping helpers before storing it, but those helpers
+  themselves clobber `A` while reprogramming `MPGSEL_0..2`.  Result: early
+  userspace copies such as the raw probe at `0x0100` were populated with
+  garbage opcodes, producing failures like `SPRINTER RAW USER PROBE` followed
+  by random execution in low memory (`PC≈0x002A`) and visible memory
+  corruption.
+- `process.c:exec_or_die()` now re-copies `udata.u_page/u_page2` from
+  `u_ptab->p_page/p_page2` immediately after `pagemap_realloc()` and again
+  right before the raw-probe `uput()` / `doexec()`.  Recent replays show
+  live user maps like `PG0=0x0A, PG1..3=0x46` at the crash site, which does
+  not match the expected freshly allocated 4-page PID1 map; this change tests
+  whether the authoritative page table in `ptab` is still correct while the
+  live `udata` copy gets clobbered.
+- Critical core fix: `cpu-z80/lowlevel-z80-banked.s:_doexec` now discards the
+  SDCC banked/noopt `push af` shim before popping the entry address.  Generated
+  call sites on Sprinter look like `push <entry>; push af; call _doexec`; the
+  old code popped only `ret` and then treated the saved `AF` word as the start
+  PC, so userspace jumped into random addresses such as `0x5721` even though
+  the raw probe bytes at `0x0100` were correct in RAM.
+- `process.c:exec_or_die()` now detects the degenerate "all four `p_page[]`
+  entries identical" PID1 map after `pagemap_realloc()`.  When that happens
+  under `CONFIG_SPRINTER_EARLY_TRACE`, it force-allocates a fresh full 4-page
+  map with `pagemap_alloc()` and immediately re-runs `program_vectors()` on
+  that map.  This is a bring-up workaround for the current early-init path:
+  replays that landed cleanly in the raw probe loop still showed
+  `u_page/p_page = 46 46 46 46`, proving the jump itself was fixed while PID1
+  was still running in a misleading one-page alias configuration.
+- Follow-up fix: once PID1 is re-mapped to a fresh 4-page allocation, the
+  staged boot-time `"/init"` argv no longer lives in the active user map.
+  `start.c:rebuild_init_argv()` now re-stages `"/init"` / `argv[]` /
+  `envp[]` into the post-realloc PID1 map before `_execve()` runs, avoiding a
+  false `panic: no /init` caused purely by the bring-up remap.
+- Current checkpoint: the raw userspace loop is now stable with
+  `PC` spinning inside `0x0100..0x0121` and live page registers showing a
+  distinct PID1 map (`PG0=0x42, PG1=0x43, PG2=0x44, PG3=0x46` in the latest
+  replay).  That closes the "can we execute arbitrary user bytes at all?"
+  question.
+- `process.c:exec_or_die()` therefore no longer jumps into the raw probe.
+  Under `CONFIG_SPRINTER_EARLY_TRACE` it only leaves the user-visible shadow
+  block at `0xEDC0..0xEDCB` plus the common-memory snapshots, then continues
+  into the real `_execve("/init")` path so the next iteration can focus on
+  syscall / loader / userspace runtime failures instead of bare entry.
+- `_execve("/init")` late-failure tracing is now extended under
+  `CONFIG_SPRINTER_EARLY_TRACE`.  Earlier dumps already proved pathname
+  lookup, inode resolution, execute permissions and header read were all
+  correct (`mode=0x81ED`, `perm=7`, `mflags=1`, valid 16-byte header), yet
+  the kernel still fell through to `panic: no /init` with `stage=0`.
+  New markers split the previously blind tail of `_execve()` into:
+  `rargs(argv)` = 8, `rargs(envp)` = 9, `pagemap_realloc()` = 10,
+  `valaddr_r()` = 11, short body `readi()` = 12.  Additional snapshots keep
+  the live `argv`/`envp` pointers and `done/count` pair so the next emulator
+  dump can distinguish argument staging, user-map validation and body-load
+  failures cleanly.
+- A returned `doexec()` is now marked explicitly as `stage = 13`, with
+  `done = entry` and `count = u_isp`.  If the next panic still lands in
+  `panic: no /init` and shows stage 13, the remaining fault is no longer in
+  `_execve()` at all but in the Sprinter user-entry contract itself
+  (`_doexec`, vectors, low-page traps, or immediate return from user mode).
+- Early boot now also exposes `i_open("bad disk inode")` payload in common
+  memory.  Besides the existing `last_iopen_dev/ino/ret`, the bad-inode path
+  now snapshots whether the failure was on an existing inode (`1`) or a
+  supposedly new inode (`2`), plus the raw `i_mode` and `i_nlink` that failed
+  validation.  This is aimed at the new on-screen `i_open: bad disk inode`
+  line appearing before `Starting /init`, which points to filesystem inode
+  corruption/readback issues rather than exec-path failure.
+- Follow-up: the ordinary `last_iopen_*` latches were being overwritten by a
+  later successful `i_open("/init")`, hiding the earlier bad-inode event.
+  Separate `bad_iopen_*` latches now preserve the most recent `badino:` path
+  payload (`dev`, `ino`, reason, `mode`, `nlink`) until the next emulator
+  dump, so the early boot warning can be decoded even if later opens succeed.
+- Syscall-exit tracing now also snapshots `u_ptab->p_page[0..2]` and whether
+  the temporary Sprinter return-path repair actually fired.  This is for the
+  new early crash mode where the machine drops straight into fallback user
+  pages (`PG0..2 = 0x08/0x09/0x0A`) with almost no console output: if
+  `u_page[]` is zero but `ptab->p_page[]` is still sane, the repair path can
+  be hardened; if both are already broken, the corruption happened earlier and
+  the next search moves to the producer of `p_page[]`, not the return path.
+- Latest replay showed the stronger case: `u_page[0..2] = 00 00 00`,
+  `u_ptab->p_page[0..2] = FF FF FF`, `spr_fixup = 1`, live `PG0..2` then
+  clamped to `0x08/0x09/0x0A`.  So the return path itself is not the source of
+  corruption; it is merely exposing an already-poisoned PID1 page table.
+  As a temporary bring-up guard under `CONFIG_SPRINTER_EARLY_TRACE`, syscall
+  exit now restores PID1's `p_page[]` from the last known-good exec snapshot
+  (`sprinter_last_exec_ptab`) whenever the live `ptab->p_page[0..2]` is out of
+  range.  This is intentionally narrow and only exists to push boot farther so
+  the true writer of the bad `p_page[]` can be identified from a later stop.
+- A follow-up attempt to remove the `push af ; call _unix_syscall ; pop af`
+  wrapper in `lowlevel-z80-banked.s` turned out to be invalid for the banked
+  toolchain itself: `tools/binmunge` only recognizes relocated cross-bank
+  calls in exactly that five-byte pattern and aborted with
+  `Bad format for relocated long call at F55D`.  That wrapper is now restored.
+- To separate "already poisoned before entering C" from "corrupted by the
+  syscall body", syscall entry now snapshots `u_page[0..2]` and
+  `u_ptab->p_page[0..2]` as `spr_sys_enter_up*` / `spr_sys_enter_pp*` in common
+  memory alongside the existing syscall-exit snapshots.
+- Latest replay tightened that result further: the first observed syscall
+  (`0x4F`) already enters with `u_page[0..2] = 00 00 00` and
+  `u_ptab->p_page[0..2] = FF FF FF`, while the live hardware map is already the
+  fallback `PG0..2 = 0x08/0x09/0x0A`.  So the corruption happens before
+  `_unix_syscall()` runs at all.  The next trace therefore also snapshots the
+  raw `u_ptab` pointer on syscall entry/exit, to distinguish "bad pointer in
+  udata" from "pointer is fine but the `struct p_tab` contents were overwritten
+  between `doexec()` and the first userspace syscall".
+- Latest proof is harsher still: on the first observed syscall, both
+  `sys_enter_ptab` and `sys_exit_ptab` are already `0x0000`.  So it is not a
+  valid `struct p_tab` being overwritten in place; `udata.u_ptab` itself has
+  been cleared before the kernel even starts processing the syscall.  As a
+  temporary bring-up guard under `CONFIG_SPRINTER_EARLY_TRACE`, the syscall
+  entry path now restores a zero `u_ptab` to `&ptab[0]` (PID 1 / init) and
+  immediately resynchronizes `u_page[]` from that slot.  This is intentionally
+  narrow and exists only to push boot past the first-user-syscall boundary so
+  the next real corruption point becomes visible.
+- The first replay with that guard changed the live hardware map from the old
+  fallback `0x08/0x09/0x0A` to a sane PID1 map (`PG0..2 = 0x48/0x4C/0x4D`),
+  proving the `u_ptab` rescue is materially affecting control flow.  However,
+  the trace itself initially became unreliable because the rescue path reused
+  register `A` before `u_callno` was recorded, so `sys_enter_no` showed a page
+  byte instead of the syscall number.  The entry trace now preserves the
+  original syscall number and records an explicit `sys_enter_fixup` flag.
+- The next replay showed `sys_enter_ptab = _ptab`, not `NULL`, but
+  `sys_enter_pp0..2 = 00 00 00` while the live hardware map was already sane
+  (`PG0..2 = 0x48/0x4C/0x4D`).  So in the current failure the pointer itself is
+  valid, but `ptab[0].p_page[]` has been zeroed before the first syscall.  The
+  syscall-entry bring-up guard now also repairs a zero/invalid `p_page[]` from
+  `mpgsel_cache[0..3]` back into both `ptab[0]` and `udata.u_page[]`.
+- With that guard in place, boot now advances into filesystem/device lookup and
+  shows `i_open: bad disk inode` followed by `panic: invalid dev` on screen.
+  The next trace therefore records the exact `dev` rejected by `validchk()` and
+  the caller-site string pointer that triggered the panic, so the next emulator
+  dump can tell whether this is a bogus inode `c_dev`, a corrupted mount/super
+  path, or a wrong block-device route.
+- Latest replay returned to the older `Starting /init` -> `panic: no /init`
+  branch, but the preserved exec snapshot finally made that one concrete:
+  `/init` in the Sprinter image is still the tiny `Applications/util/sprinit0`
+  probe (`a_text=0x0015`, `a_data=0x0003`, so `bin_size=0x0018`), while
+  `syscall_exec16.c` still rejects any exec16 image with `bin_size < 64`
+  before `doexec()`.  That rejection went through the old `F6` branch without
+  writing `sprinter_exec_fail_stage/err`, which is why the dump misleadingly
+  showed `stage=0`, `err=0` even though `_execve()` was already bailing out.
+- Current tree now makes that path explicit (`stage = 15`, `done = bin_size`,
+  `count = progptr`) and, under `CONFIG_SPRINTER_EARLY_TRACE` only, relaxes
+  the historical 64-byte minimum to `sizeof(struct exec)` so the pure-asm
+  `sprinit0` probe can actually reach `doexec()`.  This keeps the core change
+  contained to Sprinter bring-up builds while we finish stabilizing the first
+  real userland handoff; the stock limit remains unchanged for normal builds
+  and other targets.
+- That relax immediately paid off: `/init` now reaches live user mode on the
+  real exec path, with stable PID1 pages (`PG0..2 = 0x42/0x43/0x44`) and the
+  kernel-side `SPRINTER USERLAND OK` banner emitted right before `doexec()`.
+  The current `/init` is therefore no longer "missing"; the expected probe
+  runs in userspace and can sit at its own loop address with a sane 4-page map.
+- Next probe layer now moves from loop-only `/init` to a single-syscall C
+  probe.  The Sprinter package override points `/init` at `Applications/util/sprinit`,
+  which writes `SPR1` and a status byte to user common `0xED10..0xED16`, calls
+  `getpid()`, stores the returned PID there, and only then loops forever.
+  This keeps the test minimal while finally exercising the first
+  user->kernel->user syscall round-trip on a normal libc/crt0 binary.
+- Raw-probe handoff now writes a user-visible shadow block at
+  `0xEDC0..0xEDCB`:
+  - `0xEDC0..0xEDC3` = ASCII `SPR0`
+  - `0xEDC4..0xEDC7` = `udata.u_page[0..3]`
+  - `0xEDC8..0xEDCB` = `u_ptab->p_page[0..3]`
+  This block lives in user common, so it remains visible even when the crash
+  happens after `_doexec()` has switched `PG3` away from kernel common.
+- `process.c:exec_or_die()` now grows PID 1 to a full `PROGTOP` map before
+  jumping into the Sprinter raw probe.  The previous fallback reused
+  `create_init()`'s boot-sized map (one repeated 16 KB page) but still placed
+  `u_isp` at `PROGTOP - 2`, so the probe entered userspace with an
+  exec-like stack pointer on a non-exec-like address-space layout.  This keeps
+  the raw probe closer to the real `_execve()` contract and removes the last
+  obvious map/stack mismatch from the bypass path.
+- `/init` is now overridden by the tiny C probe `Applications/util/sprinit`
+  instead of the earlier loop-only asm `sprinit0`.  This keeps PID 1 on a
+  normal libc/crt0 exec16 path and exercises a real userspace syscall
+  (`getpid()`), while still remaining small enough for bring-up.
+- The earlier `exec16` lower-size guard rejected the tiny Sprinter probe
+  before `doexec()`, causing misleading `panic: no /init`.  Under
+  `CONFIG_SPRINTER_EARLY_TRACE` the minimum accepted binary size is now
+  relaxed from `64` bytes to `sizeof(struct exec)` so the probe can boot.
+- Verified checkpoint: the Sprinter path now reaches real userspace via
+  `_execve()`, shows the preserved `Starting /init` console path, and runs
+  the probe with sane live maps (`PG0..PG2 = 0x42/0x43/0x44`).  The next
+  barrier is no longer exec handoff; it is the first post-entry instruction
+  sequence around the initial libc syscall/return path.
+- Current `sprinit` stages are:
+  - `0x11` before `getpid()`
+  - `0x12` immediately after `getpid()` returns into user code
+  - `0x13` after storing the returned PID to `spr_pid`
+  These bytes live in the probe's own data area and are used to distinguish
+  "entered main but trapped in syscall" from "returned to user and died on the
+  following store/instruction".
+- `sprinit` now also has a separate `spr_loop` byte which increments inside the
+  final infinite loop.  This gives a hard split between "reached post-syscall
+  loop" and "died after `spr_stage=0x13` but before the first loop iteration".
+- Verified checkpoint: `spr_stage=0x13` and a non-zero `spr_loop` now prove
+  that the first real userspace syscall (`getpid()`) returns successfully and
+  control stays in `/init`'s userspace loop with sane live maps
+  (`PG0..PG2 = 0x42/0x43/0x44`).
+- Next probe layer extends `/init` from `getpid()` to a minimal
+  `write(1, "SPRINTER WRITE OK\\r\\n", ...)`.  New stages are:
+  - `0x11` before `getpid()`
+  - `0x12` after `getpid()` returns
+  - `0x13` after storing PID
+  - `0x14` after `write()` returns
+  and `spr_wr` stores the returned byte count.
+- The same probe state is now mirrored into a fixed user-memory trace block at
+  `0x8000` so emulator dumps do not depend on the current `.bss` placement:
+  - `0x8000` stage
+  - `0x8001-0x8002` PID
+  - `0x8003-0x8004` `write()` return value
+  - `0x8005` loop counter
+  This block lives in the process pages and remains easy to sample even if the
+  common-memory trace area is partially clobbered by a later low-page fault.
+- Follow-up finding: the z80 `crt0` calls `_brk()` before `main()`, and the
+  current Sprinter bring-up was dying in that early syscall before any probe
+  state became visible in userspace.  `sprinit` now links with a dedicated
+  probe-only `sprcrt0` that skips the initial `_brk()` so we can isolate the
+  first explicit syscalls (`getpid()`, then `write()`) without dragging the
+  allocator/bootstrap path into the trace.
+- Verified follow-up checkpoint: with `sprcrt0` in place, `sprinit` reaches
+  `spr_stage=0x14`, enters `write()` as syscall `0x08`, returns to userspace,
+  and continues looping.  The first `write(1, ...)` currently comes back with
+  `errno=0x0016` (`EINVAL`), so the syscall/return path is working; the next
+  probe switches to `write(0, ...)` to test whether the console fd binding is
+  the only blocker left before the first userspace-visible output.
+- `write(0, ...)` follows the same pattern: `spr_stage` still reaches `0x14`
+  and the syscall exits back to userspace with `errno=0x0016`.  This narrows
+  the blocker to the filesystem/descriptor side of `rwsetup()` and below,
+  rather than the generic syscall or userspace return path.  The next trace
+  layer snapshots `rwsetup()` state (`fd`, `u_base`, `u_count`, `o_access`,
+  inode mode and device word) so we can see exactly which validation path
+  turns the first `write()` into `EINVAL`.
+- Follow-up result: `rwsetup()` never starts for the failing `write()`, so the
+  rejection happens even earlier in `readwrite()`, almost certainly at
+  `valaddr(buf, nbytes, 0)`.  The current trace therefore also snapshots the
+  `valaddr()` input pointer, requested size, `u_top`, and the failure stage.
+- Next replay disproved that hypothesis too: `valaddr()` reaches its success
+  marker (`stage=6`) with the expected userspace buffer range
+  (`base=0xEDEE`, `size=0x0010`, `u_top=0xEE00`), while `rwsetup()` still
+  remains untouched and the syscall exits as `write`/`EINVAL`.  The active
+  trace therefore moves one level up into `readwrite()` itself so we can see
+  whether control actually reaches the `rwsetup()` call site after the
+  validated buffer check, or whether some earlier state/argument corruption in
+  `readwrite()` is short-circuiting before that point.
+- Follow-up note: the first `readwrite()` latches showed an impossible mix
+  (`rdwr_stage=2` but stale `valaddr(stage=6)` snapshots), so the trace now
+  explicitly clears the `rwsetup()/valaddr()` markers at `readwrite()` entry
+  and stores raw `u_argn/u_argn1/u_argn2` alongside the decoded fd/buf/count.
+  This removes ambiguity between a fresh `EINVAL` in the current `write()` and
+  stale evidence left by an older syscall.
+- Latest replay shows the fresh `readwrite()` snapshots are still garbage for
+  the first `write()` (`u_argn=0x4644`, `u_argn1=0x3973`, `u_argn2=0xF29D`)
+  while the syscall number itself remains correct (`0x08`).  That rules out
+  `write()`/`rwsetup()` entirely and points at broken userspace->kernel
+  argument marshalling for multi-argument syscalls.  The next trace therefore
+  snapshots the raw userspace stack bytes seen at `unix_syscall_entry` so the
+  exact argument offset can be fixed instead of guessed.
+- The raw userspace stack snapshot proved the offset was already correct:
+  `unix_syscall_entry` sees sane words at `SP+4` (`fd=0`, `buf=0x03B1`,
+  `count=0x0013`) for the first `write()`.  The real bug was subtler: the
+  banked syscall entry computed `HL = SP + 16` early, then ran the Sprinter
+  `u_ptab/page` repair block, clobbering `HL` before the final `LDI` sequence
+  copied arguments into `udata.u_argn*`.  The fix simply recomputes `HL`
+  immediately before the `LDI`s.  This should turn the first failing
+  multi-argument syscall from "garbage arguments" into a real device/fd-path
+  result.
+- Follow-up replay confirmed that fix: `readwrite()` now sees the correct
+  first userspace `write()` arguments (`fd=0`, `buf=0x03B1`, `count=0x0013`)
+  and `rwsetup()` is entered with valid `valaddr()` state.  The remaining
+  `EINVAL` was not a syscall marshalling problem at all: the probe was trying
+  to write to a closed inherited descriptor.  `sprinit` now mirrors the real
+  `init` contract more closely by opening `/dev/tty1`, duplicating it onto
+  `0/1/2`, and only then issuing the userspace `write()`.
+- The next replay changed failure class completely: after the `/dev/tty1`
+  probe path, the screen showed what looks like a second boot banner and then
+  died in `panic: map over`.  That panic comes from `pagemap_add()`, which
+  means `pagemap_init()` was reached again without resetting the free-page
+  pool.  Current working hypothesis is a second entry into the kernel boot
+  path after the first userland handoff.  Under
+  `CONFIG_SPRINTER_EARLY_TRACE`, `pagemap_init()` is now made idempotent for
+  bring-up (`pagemap_reset_pool()` before re-adding pages), and a new common
+  latch `_spr_boot_count` increments at the top of `fuzix_main()` so the next
+  replay can prove or disprove the double-boot theory directly.
+- Follow-up replay weakened that double-boot theory: instead of panicking in
+  `pagemap_add()`, the machine later stopped with `PC=0xFB7B` in
+  `platform-sprinter/tricks.s:fork_copy`, right on the `ldir` that clones a
+  16K bank from parent `WIN2` to child `WIN1` during `_dofork`.  That means
+  the next failure is likely not "second entry into `fuzix_main()`" but either
+  a legitimate first userspace `fork()` path or a bad control-flow jump into
+  `_dofork`.  The current trace therefore adds dedicated `_spr_dofork_*`
+  latches (caller return address, child `p_tab`, parent/child page tables,
+  current iteration, current parent/child mapped pages) so the next dump can
+  tell which of those two cases we are actually in.
+- The low-page `0x0038` vector is now split away from the generic bring-up IRQ
+  stub.  IM2 still routes to `sprinter_bringup_int`, but `0x0038` now jumps to
+  a dedicated fatal logger that snapshots the trap count, SP and the return
+  address pushed by `RST 38h`.  This is meant to answer the current question:
+  are we taking a genuine interrupt, or are we executing `0xFF` in user low
+  memory and falling into `RST 38h`.
+- Follow-up fix: the first version of `sprinter_rst38_stub` mistakenly read the
+  stack frame at the current `SP` after `push af/push hl`, so the saved
+  "return address" was actually the caller's preserved register pair.  The
+  logger now reads from `SP+4`, which is the real PC pushed by `RST 38h`.
+- Another bring-up clash surfaced immediately after: `do_program_vectors()`
+  still re-filled the legacy IM2 table at `0xFE00..0xFEFF` on every exec, but
+  `_COMMONDATA` has grown into that region again.  This silently wiped the new
+  `rst38_*` latches (and other trace state) before the first user fault could
+  be inspected.  For the current `IFF1=0` userspace milestone, the per-exec
+  IM2 reinitialisation is now skipped; the boot path still seeds IM2 once in
+  `init_hardware()`.
+- The raw probe path now also snapshots 16 bytes at `PROGLOAD` and at the
+  chosen user stack (`u_isp`) before `doexec()`, and panics with `rawret` if
+  `doexec()` ever returns.  A dump that lands in `crt0.s:stop` no longer loses
+  the failure source silently.
+- `platform-sprinter/usermem.s` no longer uses the 32K `WIN1/WIN2` bulk-copy
+  fast path for `__uput/__uget`.  That optimisation remapped the same windows
+  that can hold the banked kernel source/destination buffers, so copies from
+  code/data in `0x4000-0xBFFF` read back garbage from the freshly mapped user
+  pages instead of the intended kernel bytes.  The current code uses the safe
+  byte-at-a-time map/store/restore loops until boot is stable.
+- Raw userspace probe now writes visible markers into every 16K user window:
+  `0x0080=0x11`, `0x4100=0x12`, `0x8100=0x13`, `0xED00=0x14`, then loops
+  incrementing a counter mirrored at `0x0080/0x4101/0x8101/0xED01`.  This
+  distinguishes "never reached user mode" from "entered user mode, then lost
+  bank integrity / control flow".
+- Right before `doexec(PROGLOAD)` the bring-up path now snapshots
+  `udata.u_page[0..3]` and `u_ptab->p_page[0..3]` into common memory
+  alongside the existing entry/stack snapshots.  That makes it possible to
+  compare the intended map with the emulator's live `PG0..PG3` register dump
+  after a hang.
+
 Most likely next investigation steps:
 
 1. Instrument the raw userspace probe path more directly:
@@ -967,3 +1385,1240 @@ Use `Images/sprinter/fuzix.img` (or `fuzix.chd`) produced by that build.
    acknowledge is understood.
 6. Strip the `CONFIG_SPRINTER_EARLY_TRACE` diagnostics in the final cleanup.
 7. FDD (WD1793) + floppy boot path.
+
+### Current checkpoint (April 2026, tty/open+fork path)
+
+This older "raw userspace probe" plan is no longer the active frontier.  The
+current Sprinter-only `/init` probe now gets materially farther:
+
+- boot reaches stable kernel banner / root mount / `Starting /init`
+- `_execve("/init")` succeeds and enters real userspace
+- `getpid()` returns to userspace successfully
+- multi-argument syscall marshalling is fixed (`write(fd, buf, count)` now
+  enters the kernel with correct `fd/buf/count` instead of garbage)
+- the probe can open `/dev/tty1`, duplicate descriptors, and continue far
+  enough that the next failure is no longer in `_execve()` or the generic
+  user->kernel->user syscall return path
+
+The previously suspected "double boot" is now weaker than the evidence for a
+different failure: recent emulator dumps stop at `PC=0xFB7B`, which is inside
+`platform-sprinter/tricks.s:fork_copy`, i.e. the 16K parent->child bank copy
+loop used by `_dofork`.  So the active question is no longer "are we re-entering
+`fuzix_main()`?" but:
+
+1. are we legitimately hitting the first userspace `fork()` path, or
+2. are we jumping into `_dofork` unexpectedly because of corrupted control flow?
+
+To answer that directly, the current tree carries dedicated `_spr_dofork_*`
+common-memory latches:
+
+- `_spr_dofork_count`
+- `_spr_dofork_ret`
+- `_spr_dofork_child`
+- `_spr_dofork_upages`
+- `_spr_dofork_cpages`
+- `_spr_dofork_iter`
+- `_spr_dofork_child_page`
+- `_spr_dofork_parent_page`
+
+In the current build these live at:
+
+- `0xFEFC` `_spr_dofork_count`
+- `0xFEFD-0xFEFE` `_spr_dofork_ret`
+- `0xFEFF-0xFF00` `_spr_dofork_child`
+- `0xFF01-0xFF04` `_spr_dofork_upages`
+- `0xFF05-0xFF08` `_spr_dofork_cpages`
+- `0xFF09` `_spr_dofork_iter`
+- `0xFF0A` `_spr_dofork_child_page`
+- `0xFF0B` `_spr_dofork_parent_page`
+
+Current short-term goal:
+
+- prove whether the stop in `fork_copy` is a legitimate first `fork()` from
+  the `/init` probe path or an unexpected jump into `_dofork`
+- if it is legitimate, decode which parent/child page pair or loop iteration
+  stalls the 16K copy
+- only after that return to tty/stdin/stdout inheritance and the first usable
+  userland console path
+
+Current recommended dump for the next replay:
+
+- registers and `PG0..PG3`
+- `0xFEFB-0xFF0B`
+
+### Update from April 20 replay: fatal `RST 38h` after `/init` enters `open()`
+
+The latest emulator dump no longer matched the older `fork_copy` stop.  It
+showed:
+
+- screen text: `SPRINTER USERLAND OK`
+- CPU parked at `PC=0xF199`, `HALT=1`, `IFF1=0`
+- `PG0..PG3 = 0x48/0x4C/0x4D/0x46`
+- `0xFE84..0xFE87 = 52 EF 27 E4` in the old build's layout, i.e.
+  `_sprinter_rst38_sp = 0xEF52` and `_sprinter_rst38_ret = 0xE427`
+
+That pins the halt to `sprinter_rst38_stub`: this is a genuine executed
+`RST 38h` (`0xFF`) rather than the earlier `_panic`/`_plt_monitor` path.  The
+saved return PC `0xE427` is in the process common/stack region, not in kernel
+text, so the active failure is now "userland returned/jumped into bytes that
+contain `0xFF`" rather than a direct kernel panic.
+
+The same dump also preserved the syscall-entry latches:
+
+- last syscall entry was `sys=0x01` (`open`)
+- user and `ptab` pages were consistent (`0x42/0x43/0x44`)
+- `u_ptab` was non-zero and no entry/exit fixup was needed
+- raw syscall stack bytes decoded as the expected `open("/dev/tty1",
+  O_RDWR|O_NOCTTY, ...)` frame
+
+So the current shortest-path hypothesis is:
+
+1. `/init` reaches the first `open("/dev/tty1")` call normally,
+2. control later returns into corrupted user/common bytes near `0xE426`,
+3. those bytes contain `0xFF`, raising `RST 38h`.
+
+To expose that next replay more directly, the current tree now adds two narrow
+diagnostics:
+
+- `sprinter_rst38_stub` stores the four bytes around the faulting PC
+  (`ret-1 .. ret+2`) into `_sprinter_dbg[0..3]`
+- `Applications/util/sprinit` now uses finer stages:
+  - `0x14` after `open()` returns
+  - `0x15` after the first `dup()`
+  - `0x16` after the second `dup()`
+  - `0x17` after `write()` returns
+
+Current absolute addresses in this build:
+
+- `_sprinter_rst38_count` = `0xFE96`
+- `_sprinter_rst38_sp`    = `0xFE97`
+- `_sprinter_rst38_ret`   = `0xFE99`
+- `_sprinter_dbg[0..3]`   = `0xFFE1..0xFFE4`
+- `_spr_sys_enter_no`     = `0xFEC4`
+- `_spr_sys_exit_no`      = `0xFECE`
+- `_spr_sysarg_sp`        = `0xFEDA`
+- `_spr_sysarg_buf`       = `0xFEDC..0xFEEB`
+
+Current recommended dump for the next replay:
+
+- registers and `PG0..PG3`
+- `0x8000-0x8005` (`sprinit` stage / fd-or-write result / loop byte)
+- `0xFE96-0xFE9A` (`rst38` count, SP, return PC)
+- `0xFEC4-0xFEEB` (last syscall entry/exit + raw user stack bytes)
+- `0xFFE1-0xFFE4` (bytes around the faulting PC: `ret-1 .. ret+2`)
+
+### Update from next replay: `open()` enters kernel, then control jumps to low page
+
+The next dump tightened the failure again:
+
+- `PC=0xF1AC` (`sprinter_rst38_stub` hang loop), `IFF1=0`, `HALT=1`
+- `PG0..PG3 = 0x48/0x4E/0x4F/0x46` at trap time, i.e. kernel banks, not the
+  user `0x42/0x43/0x44` map
+- `_sprinter_rst38_sp = 0xEFFE`
+- `_sprinter_rst38_ret = 0x000A`
+- `_sprinter_dbg[0..3] = FF FF FF FF`
+
+Interpretation:
+
+- the CPU executed `0xFF` at logical address `0x0009`, causing `RST 38h`
+- because `PG0` was `0x48`, that `0x0009` fetch happened while kernel page 0
+  was mapped, not after a clean return to userspace
+- so this is no longer "bad return into user common near `0xE427`"; it is
+  "kernel-side control flow during `open()` jumped/fell into low page"
+
+The syscall latches match that:
+
+- `_spr_sys_enter_no = 0x01` (`open`)
+- `_spr_sys_exit_no = 0x12` (`getpid`)
+- `_spr_sysarg_sp = 0xEDE0`
+- raw stack bytes decode as a valid `open("/dev/tty1", 0x0802, 0)` frame
+
+So `open()` enters the kernel with sane arguments, but never reaches normal
+syscall exit.  The active suspicion is now a bad indirect kernel call during
+device-open dispatch, not userspace argument marshalling.
+
+To test that directly, `d_open()` now snapshots into `_sprinter_dbg`:
+
+- `[4]` low byte of `dev`
+- `[5]` high byte of `dev`
+- `[6]` low byte of `dev_tab[major(dev)].dev_open`
+- `[7]` high byte of `dev_tab[major(dev)].dev_open`
+- `[8]` stage byte: `0xD0` before the indirect call, `0xD1` after return
+
+Current recommended dump for the next replay:
+
+- registers and `PG0..PG3`
+- `0xFE96-0xFE9A`
+- `0xFEC4-0xFEEB`
+- `0xFFE1-0xFFE9`
+
+where:
+
+- `0xFEFB` = `_spr_boot_count`
+- `0xFEFC` = `_spr_dofork_count`
+- `0xFEFD-0xFEFE` = `_spr_dofork_ret`
+- `0xFEFF-0xFF00` = `_spr_dofork_child`
+- `0xFF01-0xFF04` = `_spr_dofork_upages`
+- `0xFF05-0xFF08` = `_spr_dofork_cpages`
+- `0xFF09` = `_spr_dofork_iter`
+- `0xFF0A` = `_spr_dofork_child_page`
+- `0xFF0B` = `_spr_dofork_parent_page`
+
+### Update from April 20 replay: `device_init()` clobbered tty `dev_tab`
+
+The next replay answered the `d_open()` question directly.  At the stop:
+
+- `PC=0xF1AC`, `HALT=1`, `IFF1=0`
+- `PG0..PG3 = 0x48/0x4E/0x4F/0x46`
+- `_sprinter_rst38_sp = 0xEFDE`
+- `_sprinter_rst38_ret = 0x26EB`
+- `_sprinter_dbg[0..3] = FF 41 0B 00`
+- `_sprinter_dbg[4..8] = 01 02 B3 04 D0`
+
+That decodes as:
+
+- `dev = 0x0201`, i.e. `/dev/tty1`
+- `dev_tab[major(dev)].dev_open = 0x04B3`
+- stage = `0xD0`, so the crash happens before the indirect call returns
+
+This is the real bug: `d_open()` is not dispatching through `tty_open` at all.
+The traced pointer `0x04B3` does not match the linked tty entry point, and the
+Sprinter-local `device_init()` in `discard.c` explains why: it was doing a
+runtime rewrite of `dev_tab[]`, including `dev_tab[2]`, replacing the static
+tty slot from `devices.c` with `no_open/no_rdwr` placeholders left over from
+earlier bring-up.
+
+The current fix keeps the block-device override for major 0 (`td_read`,
+`td_write`, `td_ioctl`) but stops `device_init()` from rewriting tty and system
+device slots.  That keeps the correction inside `platform-sprinter/` and avoids
+touching core device dispatch.
+
+Current recommended dump for the next replay after this fix:
+
+- registers and `PG0..PG3`
+- `0x8000-0x8005`
+- `0xFE96-0xFE9A`
+- `0xFEC4-0xFEEB`
+- `0xFFE1-0xFFE9`
+
+Expected change if this diagnosis is correct:
+
+- `_sprinter_dbg[6..7]` should now point at the tty open handler rather than
+  `0x04B3`
+- `_sprinter_dbg[8]` should advance to `0xD1` or the userspace stage bytes
+  should move past `0x15`
+
+### Update from direct RAM dump: live `_dev_tab` overwritten with syscall-stub addresses
+
+The next dump included the live `_dev_tab` window itself and made the failure
+much more concrete:
+
+- `PC=0x265C`, which is inside `_i_tab`, not executable kernel text
+- `PG0..PG3 = 0x48/0x4E/0x4F/0x46`
+- live RAM at `0x0A80..0x0AB1` no longer contained the static device switch
+  table (`tty_open = 0x7ED5`, etc.)
+- instead it contained a dense sequence of low addresses
+  `0x04B3, 0x04B9, 0x04BF, ...`
+
+Those values step by six bytes and look like syscall-stub addresses, not
+device handlers.  So the current evidence is:
+
+1. `_dev_tab` is being overwritten in RAM after boot
+2. `d_open()` is faithfully reading that corrupted table
+3. the indirect call then drives control flow off into data, eventually
+   landing at `PC=0x265C` inside `_i_tab`
+
+As a temporary bring-up guard under `CONFIG_SPRINTER_EARLY_TRACE`, the current
+tree now adds `sprinter_restore_devsw()` in `platform-sprinter/discard.c` and
+teaches `d_open()` to repair the Sprinter `devsw` table if the tty slot points
+below `0x4000` instead of at the linked tty handler.  The guard records
+`_sprinter_dbg[9] = 0xDA` when it fires.
+
+Current recommended dump for the next replay after this guard:
+
+- registers and `PG0..PG3`
+- `0x8000-0x8005`
+- `0xFE96-0xFE9A`
+- `0xFEC4-0xFEEB`
+- `0xFFE1-0xFFEA`
+
+Key fields:
+
+- `FFE7/FFE8` should become `D5 7E` after the repair
+- `FFEA` should be `DA` if the guard had to restore `_dev_tab`
+- `FFE9` should advance to `D1` if `tty_open()` returns normally
+
+### Update from next replay: `d_open()` itself miscompiled under trace build
+
+The next replay showed:
+
+- `FFEA = 0xDA`, so the emergency `devsw` repair path did run
+- but `FFE7/FFE8` still came back as `CB 04`, not the repaired tty handler
+- `PC` was back in `sprinter_rst38_stub` with `_sprinter_rst38_ret = 0x26EB`
+
+That ruled out the previous hypothesis that `sprinter_restore_devsw()` was
+writing the wrong value.  The generated assembly for `d_open()` under the trace
+build was the real issue: instead of indexing `dev_tab` from the `dev` argument
+cleanly, SDCC emitted a broken sequence around the `fn = dev_tab[major(dev)]`
+fetch (`pop de / push de` and then address arithmetic from that transient
+register pair).  So after the repair call, the function pointer reload still
+read from the wrong address and reproduced the stale `0x04CB` value.
+
+The current fix rewrites `d_open()` into a simpler form with explicit
+`maj/min/dp` temporaries:
+
+- `maj = major(dev)`
+- `min = minor(dev)`
+- `dp = &dev_tab[maj]`
+- `fn = dp->dev_open`
+
+and uses the same explicit reload after the repair path.  This is intended
+solely to force a sane codegen shape and expose the next failure beyond the
+current miscompiled indirect fetch.
+
+### Update from next replay: bypass tty `dev_tab` fetch entirely
+
+The replay after that rewrite still did not match the new `devio.rst`
+assembly.  The dump continued to show:
+
+- `FFEA = 0xDA` (repair path entered)
+- `FFE7/FFE8 = 0x04CB` (still not the tty handler)
+- no forward progress past the first tty open
+
+At that point the shortest path is no longer to keep massaging SDCC's codegen
+for the indirect device-open fetch.  Under `CONFIG_SPRINTER_EARLY_TRACE`,
+`d_open()` now takes a direct fast path for tty major 2:
+
+- `fn = tty_open`
+- snapshot the direct function pointer into `_sprinter_dbg[6..7]`
+- call it directly with `minor(dev), flag`
+
+This bypasses the corrupted/mis-fetched `dev_tab` path only for the current
+Sprinter bring-up trace build and should expose the next real failure after
+the tty open boundary.
+
+### Update from next replay: tty bootstrap passes, later filesystem path feeds `i_open(dev=0x0201)`
+
+The next replay advanced materially:
+
+- screen now shows `SPRINTER WRITE OK`
+- then `i_open: bad disk inode`
+- then `panic: invalid dev`
+
+The existing common-memory latches decode this as:
+
+- `bad_iopen_dev = 0x0201`
+- `bad_iopen_ino = 0x0147`
+- `bad_iopen_bad = 2`
+- `bad_iopen_mode = 0x0000`
+- `bad_iopen_nlink = 0x0000`
+- `last_validchk_dev = 0x1133`
+- `last_validchk_site = 0x065E` (`PANIC_IOPEN`)
+
+So the tty path is no longer the blocker.  A later filesystem path is calling
+`i_open()` on `/dev/tty1` as if it were a normal filesystem device, then
+progresses to another `i_open()` with a fully bogus `dev=0x1133`.
+
+To identify the producer rather than the symptom, the current tree now stores
+the last `i_open()` caller marker in `_sprinter_dbg[10..14]`:
+
+- `0x31` `i_open(wd->c_dev, inum)`
+- `0x32` `i_open(m->m_dev, ROOTINODE)`
+- `0x33` direct entry to `i_open(dev, ino)`
+- `0x34` `i_open(pino->c_dev, 0)`
+- `0x35` boot root open from `start.c`
+- `0x36` root open from `syscall_fs.c`
+- `0x37` root open from `syscall_net.c`
+
+Current recommended dump for the next replay:
+
+- registers and `PG0..PG3`
+- `0xFE83-0xFE95`
+- `0xFEC0-0xFF0B`
+
+### Update from next replay: first `dup()` sees a partially zeroed live `i_tab` slot
+
+The next replay advanced again and changed failure mode:
+
+- screen shows `SPRINTER USERLAND OK`
+- then `magic0 ptr=264E slot=0025 site=0004 ...`
+- then `panic: corrupt inode`
+
+This is no longer the earlier `i_open(dev=0x0201)`/`invalid dev` stop.  The
+new stop is `magic()` from `getinode()` (`site=4`) during syscall `0x11`
+(`dup`).  The failing live inode slot decodes as:
+
+- `ptr = 0x264E`
+- `slot = 0x25`
+- first 4 bytes are already zero (`c_magic = 0`, `c_dev = 0`)
+- tail of the slot is still populated (`c_num = 0x0020`, `c_flags = 0x40`)
+
+The direct memory dump confirms this is a partial overwrite of a live `i_tab`
+entry, not a wild pointer:
+
+- `i_tab` base is `0x22B1`
+- slot size is 25 bytes
+- slot `0x25` starts exactly at `0x264E`
+
+So the immediate question is no longer "which bogus device reached `i_open()`",
+but "who zeros the first 4 bytes of the tty inode slot between successful
+`open("/dev/tty1")` and the first `dup()`".
+
+To catch both sides of that boundary, the current trace build now latches:
+
+- `_sprinter_dbg[24..30]` (`0xFFF9-0xFFFF`) on successful `_open()`
+  - `[24]` stage `0xA1`
+  - `[25..26]` inode pointer returned by open
+  - `[27..28]` `c_magic`
+  - `[29..30]` `c_dev`
+- `spr_g*` on `_dup()` entry before `getinode()`
+  - `spr_gir = 0xA2`
+  - `spr_giu = old fd`
+  - `spr_gio = oft index`
+  - `spr_giin = of_tab[oft].o_inode`
+  - `spr_gifr/spr_gifa = c_magic low/high`
+  - `spr_gis = c_dev`
+
+Current recommended dump for the next replay:
+
+- registers and `PG0..PG3`
+- `0xFE83-0xFE95`
+- `0xFEC0-0xFF0B`
+- `0xFFF9-0xFFFF`
+- `0xFFEB-0xFFEF`
+
+### Update from next replay: `_open()` returns a live inode, corruption happens before `_dup()`
+
+The next replay filled in the missing tail bytes:
+
+- `_dup()` pre-snapshot (`spr_g*`) still sees `of_tab[0].o_inode = 0x264E`
+- but that inode already has `c_magic = 0x0000` and `c_dev = 0x0000`
+- the `_open()` tail snapshot survives partially even though `_plt_monitor`
+  reuses `_sprinter_dbg[24..27]`
+  - `_sprinter_dbg[28] = 0x60`, which matches the high byte of `CMAGIC`
+    (`0x6091`)
+  - `_sprinter_dbg[29..30] = 0x0001`, so `_open()` returned the inode alive on
+    `dev = 0x0001`
+
+This tightens the corruption window to:
+
+- after successful return from `_open()`
+- before `_dup()` enters `getinode()`
+
+The old `sprinit` diagnostic binary was still writing globals in low user
+memory (`spr_stage`, `spr_pid`, `spr_fd`, `spr_wr`, `spr_loop`) and also
+poking `0x8000`.  Since the inode slot is already dead before the first
+`dup()`, the current tree now swaps in a narrower `sprinit` that:
+
+- uses only locals/stack
+- drops the `0x8000` trace writes
+- still does `getpid()`, `open("/dev/tty1")`, `dup()`, `dup()`,
+  `write(1, "SPRINTER WRITE OK\\r\\n", ...)`, then `pause()`
+
+If this build gets past the old `corrupt inode` stop, that confirms the next
+real bug is user low-page writes landing in kernel RAM after syscall return,
+not filesystem/open logic.
+
+That hypothesis did **not** hold: the narrower `sprinit` still dies at the same
+first-`dup()` `magic()` stop.  The generated `sprinit.s` shows the first code
+after `open()` keeps the returned fd on the user stack and also uses SDCC low
+page temporaries around `0x026B..0x0295`, so the next working hypothesis is now
+more specific:
+
+- either user low page (`WIN0`) is still kernel page `0x48` after syscall return
+- or the live page register cache no longer matches `u_page[]`
+
+The attempted follow-up probe in `lowlevel-z80-banked.s` to stash the live
+mapping at syscall entry overran `COMMONDATA`, so that approach was dropped.
+Instead, the current test removes SDCC from the post-`open()` user path
+entirely: `sprinit` is now built from a hand-written `sprinit.s` that issues
+`getpid()`, `open("/dev/tty1")`, `dup()`, `dup()`, `write()`, `pause()` with
+direct wrapper calls and without SDCC low-page temporaries or stack shuffling
+between `open()` and the first `dup()`.
+
+That also did **not** change the stop: the first `dup()` still sees the inode
+slot at `0x264E` already zeroed. This rules out SDCC-generated user code as the
+writer.
+
+The next probe therefore reuses the existing syscall entry page latches:
+
+- `_spr_sys_enter_up0..2` remain `u_page[]`
+- `_spr_sys_enter_pp0..2` now record the live `mpgsel_cache[0..2]` values
+  instead of duplicating `ptab->p_page[]`
+
+This answers the remaining mapping question directly: if the failing `dup()`
+enters with `_spr_sys_enter_pp0..2 = 0x48,0x49,0x4A` while `_spr_sys_enter_up*`
+still says `0x42,0x43,0x44`, then userland really did run on kernel pages and
+the inode overwrite is a syscall-return mapping bug. If the live pages are
+already `0x42,0x43,0x44`, the writer is elsewhere in the kernel path.
+
+The next replay ruled out that mapping bug as well: on the failing `dup()`,
+both `_spr_sys_enter_up0..2` and live `_spr_sys_enter_pp0..2` are
+`0x42,0x43,0x44`. So the process re-enters the kernel with normal user pages,
+yet the tty inode slot is already dead.
+
+The low-level "open-tail" recheck idea did not fit in the current
+`COMMONDATA` budget, so the current trace build narrows the window from the C
+side instead: `_open()` now overwrites `_sprinter_dbg[24..30]` a second time
+**after** `i_unlock(ino)` and immediately before returning to the syscall
+wrapper:
+
+- `_sprinter_dbg[24] = 0xA4` means the post-`i_unlock()` snapshot ran
+- `[25..26]` are the inode pointer
+- `[27..28]` are `c_magic` after `i_unlock()`
+- `[29..30]` are `c_dev` after `i_unlock()`
+
+If those bytes are already `0000/0000`, then the writer sits inside `_open()`
+or below it. If they still show `CMAGIC`/`0x0001`, the overwrite happens after
+the C syscall body returns.
+
+The next replay showed the latter is false: the surviving tail bytes from
+`_sprinter_dbg[28..30]` are already wrong by the time panic hits, so the inode
+is dead by the post-`i_unlock()` snapshot.
+
+To split that remaining kernel-side window again without adding new common
+symbols, the current trace build reuses the dormant `spr_rdwr_*` block
+(`0xFEEC..0xFEF8`) before the first real read/write syscall:
+
+- `spr_rdwr_stage = 0xB0` right after `dev_openi()` returns in `_open()`
+- `spr_rdwr_reading = flag`
+- `spr_rdwr_fd = oftindex`
+- `spr_rdwr_base = ino` pointer
+- `spr_rdwr_count = ino->c_magic`
+- `spr_rdwr_argn = ino->c_dev`
+- `spr_rdwr_argn1 = ino->c_num`
+- `spr_rdwr_argn2 = ino->c_node.i_addr[0]`
+
+If that snapshot is already corrupt, the writer is inside `dev_openi()`
+(`d_open()`/`tty_post()` path). If it is still sane, the writer is later in
+`_open()` between `i_lock(ino)` and the post-`i_unlock()` snapshot.
+
+The next replay ruled out the first half of that window as well. On the
+failing boot:
+
+- `spr_rdwr_stage = 0xB0`
+- `spr_rdwr_base = 0x264E`
+- `spr_rdwr_count = 0x6091`
+- `spr_rdwr_argn = 0x0001`
+- `spr_rdwr_argn1 = 0x0020`
+- `spr_rdwr_argn2 = 0x0201`
+
+So the tty inode is still intact immediately after `dev_openi()` returns from
+`_open()`.
+
+The next replay showed that this single post-`i_unlock()` marker never
+appeared at all, even though `0xB0` after `dev_openi()` is present and the
+syscall later reports success. To split the remaining tail by progress rather
+than by a single final snapshot, the current trace build reuses the same
+`spr_rw_*` block (`0xFEF9..0xFF03`) as a stepped marker through the last part
+of `_open()`:
+
+- `spr_rw_stage = 0xB1` just before `udata.u_files[uindex] = oftindex`
+- `spr_rw_stage = 0xB2` immediately after linking `u_files[]`
+- `spr_rw_stage = 0xB3` after reader/writer accounting and just before
+  `i_unlock(ino)`
+- `spr_rw_stage = 0xB4` immediately after `i_unlock(ino)`
+
+At each stage the block still snapshots:
+
+- `spr_rw_fd = uindex`
+- `spr_rw_base = ino` pointer
+- `spr_rw_count = ino->c_magic`
+- `spr_rw_access = flag`
+- `spr_rw_mode = ino->c_dev`
+- `spr_rw_dev = ino->c_num`
+
+This makes the next replay decisive: the highest `0xB1..0xB4` value tells us
+exactly how far the `_open()` tail really ran before the inode goes bad.
+
+### Update from next replay: first boot reaches `write()`, then the machine reboots
+
+The next replay moved past the old inode/open window entirely:
+
+- the screen shows `SPRINTER WRITE OK`
+- `_spr_boot_count = 2`, so the machine has really re-entered `fuzix_main()`
+  rather than merely redrawing the old banner
+- `_spr_rdwr_stage = 0x05` and `spr_rw_stage = 0x05`, which means the live
+  trace block has already been reused by the successful `write(1, ..., 19)`
+  path
+- the stop captured after the second banner is now `PC=0xF1AC`
+  (`sprinter_rst38_stub` hang loop), not the earlier `panic: corrupt inode`
+
+So the previous bring-up blocker is gone: the current shortest path now reaches
+`open("/dev/tty1")`, both `dup()` calls, and a successful `write()`.  The next
+question is whether the reboot happens before `_write()` returns to userspace,
+or later in the `pause()`/sleep path.
+
+To split that without widening the kernel trace again, the current image uses a
+second userspace marker in `sprinit.s`: after the first successful
+`write("SPRINTER WRITE OK\\r\\n")`, PID 1 immediately does another
+`write("SPRINTER RETURN OK\\r\\n")` and then drops into a pure local
+`jr hang_loop` instead of calling `_pause()`.
+
+Interpretation for the next replay:
+
+- seeing only `SPRINTER WRITE OK` still means the failure is in the first
+  `write()` return path or immediately after it
+- seeing `SPRINTER RETURN OK` means `_write()` returned cleanly and the old
+  reboot was caused later by the `pause()`/sleep path
+- if the system now stays up in the local hang loop, the next kernel target is
+  `_pause()`/`psleep(0)`/wake-up handling rather than tty/open/write
+
+The next replay ruled out the `pause()` path entirely: PID 1 still prints only
+`SPRINTER WRITE OK`, never reaches `SPRINTER RETURN OK`, and the syscall latches
+show the trap happens with syscall `0x08` (`write`) still in flight:
+
+- `_spr_sys_enter_no = 0x08`
+- `_spr_sys_exit_no` is still the previous completed syscall
+- `spr_rdwr_stage = 5`
+
+So the current failure is inside the kernel-side `write()` path, after
+`valaddr()` and `rwsetup()` have succeeded, but before `_write()` returns to
+userspace.
+
+To split that path, the current trace build reuses `spr_rw_*` as a
+`writei()`/`cdwrite()`/`tty_write()` ladder:
+
+- `0xC1` in `writei()` just before `cdwrite()`
+- `0xC2` in `writei()` right after `cdwrite()` returns
+- `0xC3` in `cdwrite()` just before `dev_write`
+- `0xC4` on entry to `tty_write()`
+- `0xC5` after `valaddr_r()` and tty lookup
+- `0xC6` after the first byte fetch from userspace
+
+The next replay can now tell whether the trap sits in `writei()`, device
+dispatch, tty validation, or the first `_ugetc()`/`tty_putc_maywait()` step.
+
+The next replay moved past that whole path as well: the screen now reaches
+both `SPRINTER WRITE OK` and `SPRINTER RETURN OK`, and the immediate reboot is
+gone. So both `write()` calls return to userspace cleanly, and the local
+`jr hang_loop` is stable enough to keep the machine from re-entering the boot
+banner.
+
+That makes the next target the original `pause()`/sleep path again, but now
+with the tty/write path removed from the equation. The current `sprinit.s`
+therefore does:
+
+1. `write("SPRINTER WRITE OK")`
+2. `write("SPRINTER RETURN OK")`
+3. `_pause(0)`
+4. if `_pause()` ever returns, `write("SPRINTER PAUSE OK")`
+5. local `jr hang_loop`
+
+Interpretation for the next replay is now trivial from the screen alone:
+
+- stops after `SPRINTER RETURN OK` => failure in `_pause()` / `psleep(0)` path
+- shows `SPRINTER PAUSE OK` => `_pause()` returned and the old blocker sits
+  later than the sleep syscall itself
+
+The next replay hit exactly that first case. After `SPRINTER RETURN OK`,
+PID 1 enters `_pause(0)` and the machine eventually prints garbage followed by
+`panic: invalid dev`. The common latches at that stop show:
+
+- `_spr_sys_enter_no = 0x25` (`_pause`)
+- `_spr_sys_exit_no = 0x08` (last completed syscall is still `write`)
+- `_sprinter_last_validchk_dev = 0x72E4`
+- `_sprinter_last_validchk_site = 0x065E` (`PANIC_IOPEN`)
+- `_sprinter_last_panic_ptr` points at `"invalid dev"`
+
+So the next failure is no longer tty/output-related. The kernel enters the
+sleep/scheduler path for `_pause()`, then some later control-flow/state
+corruption leads to `i_open(dev=0x72E4)` and `PANIC_INVD`.
+
+To split that path without widening the trace surface, the current image
+reuses `spr_rw_*` as a scheduler ladder:
+
+- `0xD0` at `do_psleep()` entry
+- `0xD1` at `switchout()` entry
+- `0xD2` on the `chksigs()` fast-return path
+- `0xD3` while idling with `nready == 0`
+- `0xD4` on the single-runnable-process short return
+- `0xD5` just before `plt_switchout()`
+- `0xE0` on entry to Sprinter `_plt_switchout`
+- `0xE1` after `_getproc()` returns a process pointer
+- `0xE2` immediately before calling `_switchin`
+- `0xE3` if `_switchin` unexpectedly returns back to `_plt_switchout`
+
+The next replay should therefore tell us whether `_pause()` dies before
+platform switchout, inside scheduler selection, or specifically on the
+unexpected `_switchin` return path.
+
+The next replay ruled out scheduler handoff as the first failing point:
+`spr_rw_stage = 0xD3` at the stop, which means `_pause()` reaches the
+`while (nready == 0)` idle loop inside `switchout()`. So PID 1 goes to sleep,
+there are no runnable tasks, and the next corruption happens inside
+`plt_idle()` or immediately after it returns.
+
+The current trace build therefore adds the cheapest possible split directly in
+`platform-sprinter/main.c:plt_idle()`:
+
+- `0xD6` before `kbd_poll()`
+- `0xD7` after `kbd_poll()`
+- `0xD8` after `timer_interrupt()`
+
+This is enough to tell whether the `_pause()` failure is in the keyboard poll,
+the software timer tick, or later than `plt_idle()` itself.
+
+Current checkpoint after the later boot-marker narrowing:
+
+- `0123456789ABEFJNPQSTVWXY` on screen means boot reaches the IDE PIO read
+  path for the root superblock, the command is issued, `DRQ` is ready, and
+  the blocker sits in the final low-level transfer step between
+  `ide_xfer()` and the return from `_devide_read_data()`.
+
+- A first attempt to add lowercase `a..e` markers directly inside
+  `_devide_read_data()` regressed the machine back to `0123`, so that split
+  has been removed again.  The working baseline remains the uppercase ladder
+  through `...XY`, and the next iteration should isolate the final transfer
+  path without perturbing the early boot layout.
+
+Current recommended dump for the next replay:
+
+- screen text / whether `SPRINTER WRITE OK` appears
+- registers and `PG0..PG3` if it still stops
+- `0xFEEC-0xFF03`
+- `0xFEA8-0xFEB0`
+- `0xFEC4-0xFEEB`
+- `0xFFF9-0xFFFF`
+
+The subsequent replays still showed the old `0xC6` write-path marker and
+never reached `SPRINTER RETURN OK`, which means the emulator was not yet
+running the rebuilt idle-split image. The current production-oriented
+bring-up fix therefore narrows the suspected source directly in
+`platform-sprinter/main.c`: under `CONFIG_SPRINTER_EARLY_TRACE`,
+`plt_idle()` and `plt_interrupt()` no longer feed `kbd_poll()` into the tty
+layer at all, and only keep the software timer running.
+
+This is based on the visible symptom pattern from the pause tests:
+
+- after `SPRINTER RETURN OK`, the machine prints random printable garbage
+- that is followed by `i_open: bad disk inode`
+- and finally `panic: invalid dev`
+
+That sequence matches spurious PS/2 receive bytes being decoded as shell
+input during idle, not a scheduler or mapping failure. Until the SIO/PS2
+initialisation is cleaned up, suppressing keyboard polling is the smallest
+platform-local way to stabilize sleep/idle and let the rest of the runtime
+boot path proceed.
+
+In parallel, the hand-written `Applications/util/sprinit.s` had two real
+userland-side bugs that made later replays harder to interpret:
+
+- the `write("SPRINTER RETURN OK\\r\\n")` length was `22` instead of `20`
+- the `write("SPRINTER PAUSE OK\\r\\n")` length was `21` instead of `19`
+- `_pause()` was called with an unnecessary pushed zero even though the libc
+  wrapper takes no argument
+
+Those are now fixed so the next replay should reflect only kernel/platform
+state, not over-read strings or a mis-shaped user stack at the pause call.
+
+To keep bring-up moving while the sleep/switch path is still unstable, the
+current trace image also carries a narrow core-side guard in
+`Kernel/syscall_proc.c:_pause()`: under `CONFIG_SPRINTER_EARLY_TRACE`, a
+plain `pause(0)` from PID 1 returns immediately instead of entering
+`psleep(0)`. This is intentionally temporary and exists only to let the
+Sprinter diagnostic `/init` advance beyond the `pause()` checkpoint and
+validate later userland/runtime state.
+
+That bypass is now confirmed working: the latest replay reaches
+`SPRINTER PAUSE OK` and then sits in ordinary userspace code instead of
+dropping into the old `invalid dev` / `i_open` panic path. The current
+checkpoint is therefore no longer "make `/init` survive"; it is "hand off
+from the diagnostic `/init` into a real userspace program".
+
+The next trace image changes only the hand-written `Applications/util/sprinit.s`
+tail: after `SPRINTER PAUSE OK`, PID 1 now calls
+`execve("/bin/sh", argv, NULL)` on the already duplicated `/dev/tty1`
+descriptors. If `execve()` unexpectedly returns, the probe prints
+`SPRINTER EXEC FAIL` and then falls back to the local `jr hang_loop`.
+
+This gives a clean binary next-step result:
+
+- if the screen switches into a shell prompt, the current bring-up image is
+  already capable of launching real userspace on Sprinter;
+- if `SPRINTER EXEC FAIL` appears, the next blocker is now firmly in the
+  exec handoff to `/bin/sh`, not in open/dup/write/pause.
+
+The very next replay reintroduced an earlier class of stop before any of the
+probe writes reached the screen, even though the syscall latches still showed
+the first `write(1, ...)` entering `readwrite()` with sane arguments and
+getting as far as `rwsetup()`/`valaddr()`. Rather than keep debugging the
+diagnostic text path, the current image now strips `/init` down further:
+
+- `getpid()`
+- `open("/dev/tty1", 0x0802)` with retry
+- `dup(fd)` twice to claim `0/1/2`
+- direct `execve("/bin/sh", argv, NULL)`
+
+If `execve()` returns unexpectedly, the probe still prints
+`SPRINTER EXEC FAIL` and falls back to the local loop. This makes the next
+replay answer the real bring-up question directly: can PID 1 hand off into
+the stock shell once the tty is opened, without any intermediate diagnostic
+`write()` or `_pause()` traffic.
+
+The following replay still died before any `/init`-side text appeared, and
+the existing `_execve()` failure latches remained unchanged from the earlier
+`/init` handoff. That means the new probe was not even reaching the
+`execve("/bin/sh")` call; it was failing somewhere earlier in its own
+userspace path. To narrow that further without reintroducing the noisy write
+path, the current image removes the initial `getpid()` entirely and leaves the
+minimal sequence as:
+
+- `open("/dev/tty1", 0x0802)` with retry
+- `dup(fd)` twice
+- `execve("/bin/sh", argv, NULL)`
+
+If the next replay still stops at `SPRINTER USERLAND OK`, then the remaining
+early blocker is before or inside the first `open()` itself. If it advances,
+the old `getpid()` round-trip was the destabilising piece in this stripped
+probe layout.
+- 2026-04-21: repeated reboots during `/init` handoff narrowed to
+  `map_proc_2` taking `HL=0xFDE6`, where the bytes were `48 4C 4D 46`
+  from the exec-trace block rather than a real page map. The old
+  validator only checked `0x08 <= page < 0x80`, so this bogus pointer
+  slipped through. The guard was tightened to the narrow observed case:
+  if bank0 is `0x48` then bank1 must be the canonical `0x49`, otherwise
+  `map_proc_2` falls back to `_udata + U_DATA__U_PAGE`. This avoids the
+  `HL=0xFDE6 -> 48 4C 4D 46` exec-trace alias without growing common
+  code enough to overflow `_COMMONDATA`.
+- 2026-04-21: the next crash moved even earlier, between `Starting /init`
+  and the first useful state inside `_execve()`. The remaining
+  pre-exec bring-up shadow writes in `complete_init()` (`uput()` to
+  `0xEDC0..0xEDCB`) were removed; for this stage we only keep the
+  kernel-side page-map snapshot in common memory. The goal is to enter
+  `_execve()` with no user-space writes at all before the real `/init`
+  handoff.
+- 2026-04-21: latest dumps show PID1 still entering the `/init` handoff
+  with a half-stale map (`PG0..PG3 = 08/49/4A/49`) even after the
+  `map_proc_2` alias guard. The likely source is the old boot-time
+  degenerate map being "grown" in place. Under
+  `CONFIG_SPRINTER_EARLY_TRACE`, `exec_or_die()` now discards PID1's
+  boot map with `pagemap_free()` and allocates a fresh full `PROGTOP`
+  map via `pagemap_alloc()` before `program_vectors()` and `_execve()`.
+- 2026-04-21: that fresh-map shim did not move the failure; the trap still
+  hits before `_execve("/init")` becomes observable. For the next
+  iteration `exec_or_die()` was cut back to a passive snapshot only:
+  no raw probe, no `pagemap_realloc()`, no `pagemap_free()/alloc()`,
+  no extra `program_vectors()`. The handoff path is again the stock
+  `_execve()` path with only kernel-side state capture left in place.
+- 2026-04-21: the next replay finally showed PID1 entering `/init` with a
+  sane 4-page user map (`PG0..PG3 = 40/41/42/43`), but the trap still hit
+  before the first stable syscall from userspace. The remaining
+  pre-`_execve()` helper in `exec_or_die()` was `rebuild_init_argv()`,
+  which rewrote `/init` argv/envp into user memory a second time even
+  though `complete_init()` had already prepared them. That duplicate
+  user-memory write path is now removed; `exec_or_die()` keeps only the
+  passive page-map snapshot and then drops straight into the stock
+  `_execve()` path.
+- 2026-04-21: the raw standalone `/init` proved to be present in the image,
+  but the first userspace `open("/dev/tty1")` / `dup()` sequence still
+  trapped before any stable visible progress. For the next bring-up step,
+  PID1 now receives pre-opened `stdin/stdout/stderr` on `/dev/tty1`
+  directly from the kernel under `CONFIG_SPRINTER_EARLY_TRACE`, and the
+  raw `/init` is reduced to a single `execve("/bin/sh", argv, NULL)` plus
+  the existing `SPRINTER EXEC FAIL` fallback if that handoff returns.
+- 2026-04-21: the re-enabled circular trace exposed a platform-local
+  memory-layout bug in the early-trace image itself: `_COMMONDATA`
+  already reaches `0xFDxx..0xFExx`, while `init_hardware()` was still
+  building the IM2 table at `0xFE00` and the bring-up IRQ stub at
+  `0xFDFD`. That made the trace/common globals overlap the interrupt
+  vector page and handler stub, so later boots could corrupt either the
+  IM2 path or the trace state simply by touching `_COMMONDATA`.
+  The current image moves the temporary IM2 table+stub below commondata:
+  the vector page is now `0xFC00`, filled with `0xFC`, which resolves
+  every IM2 vector to a fixed stub at `0xFCFC`. This keeps the whole
+  early-trace common block and the bring-up IM2 machinery disjoint.
+- 2026-04-21: after the IM2 relocation fix the machine still stops at
+  `F1AC` very early, with the screen showing only the banner and
+  `Devboot`. The important difference is that the live map is now
+  canonical at the point of failure:
+  `PG0..PG3 = 0x40/0x41/0x42/0x43`, `I = 0xFC`, and the old
+  `_COMMONDATA`/IM2 overlap signature is gone. This means the current
+  blocker is no longer "corrupted IM2 page layout" but an earlier boot
+  path before `kputs("OK\\n")` / `Starting /init`.
+- 2026-04-21: because `_COMMONMEM` now lives at `0xEE00`, the historical
+  `0xFDxx..0xFFxx` dumps no longer directly expose the relevant live
+  trace state. The current image therefore adds screen-localised boot
+  markers under `CONFIG_SPRINTER_EARLY_TRACE` in `start.c`:
+  `A` after `create_init()`, `B` after `device_init()`, `C` after
+  successful `fmount(root_dev, ...)`, and `D` after successful
+  `i_open(root_dev, ROOTINODE)`.
+- 2026-04-21: the first version of those markers used `kputchar()`, but
+  the replay still showed only `Devboot`, so the tty/cursor path was not
+  trustworthy enough for this checkpoint. The marker path now writes
+  directly to VRAM via `plot_char()` on a fixed row, bypassing tty output
+  entirely. The next replay should therefore localise the early stop from
+  the screen alone even if tty output is still unstable at that point.
+- 2026-04-21: the first VRAM-marker replay still showed only `Devboot`,
+  which means the stop is even earlier than the original `A/B/C/D`
+  window or the first visible marker was placed too late. The current
+  image therefore extends the same direct-VRAM row with earlier stage
+  bytes:
+  - `0` right after the `Devboot` banner is printed
+  - `1` after `bufinit()`
+  - `2` after `fstabinit()`
+  - `3` after `pagemap_init()`
+  - then `A/B/C/D` for `create_init()`, `device_init()`, `fmount()`,
+    `i_open(root)` as before
+- 2026-04-21: a later replay with the relocated IM2 table and canonical
+  PID1 map (`PG0..PG3 = 0x40/0x41/0x42/0x43`) still stopped at `F1AC`,
+  but the live trace ring now ends at `0xC2`.  That means boot reaches
+  `create_init()`, completes `map_init()`, and dies before `0xC3`
+  (`makeproc()` finished).  The narrow platform-local hypothesis is
+  that `makeproc()->program_vectors()` was still executing from WIN0
+  while remapping WIN0 to the new process page, i.e. a self-unmap in
+  the vector setup path.  The current image moves the remap + vector
+  patching sequence into a `_COMMONMEM` helper so the code keeps
+  executing from WIN3 while WIN0 is switched to user RAM and then back
+  to kernel pages.
+- 2026-04-21: after the `_COMMONMEM` `program_vectors()` fix the first
+  visible on-screen progress advanced to `0123`, which proves the boot
+  now reliably reaches `create_init()`.  The next image narrows that
+  window further with direct-VRAM markers inside `create_init()` itself:
+  - `4` after `map_init()`
+  - `5` after `makeproc()`
+  - `6` after `uzero(PROGLOAD + 256, 32)`
+  - `7` after `add_argument("/init")`
+  This split should isolate the current blocker to either the
+  `makeproc()/program_vectors()` tail or the first user-memory write
+  path used to stage `/init`.
+- 2026-04-21: the next replay reached `012345` and then stopped, so the
+  current blocker is specifically the first `uzero(PROGLOAD + 256, 32)`
+  in `create_init()`.  Under `CONFIG_SPRINTER_EARLY_TRACE` this bulk
+  clear is now skipped temporarily: the scratch area is immediately
+  overwritten by `add_argument("/init")` and the later argv terminator
+  writes, so the no-op is sufficient as a bring-up guard to advance to
+  the next real failure in the `/init` staging path.
+- 2026-04-21: with the `uzero()` bypass active, the next replay reached
+  `0123456` and then stopped.  That localises the new blocker to
+  `add_argument("/init")`, i.e. the first `uput/uputp` staging of
+  `"/init"` and `argv[0]` into PID1 user space.  The current image now
+  keeps the same layout but uses the raw `_uput/_uputw` helpers under
+  `CONFIG_SPRINTER_EARLY_TRACE`, bypassing the validated usermem wrapper
+  path just for this boot-only argv staging.
+- 2026-04-21: `complete_init()` and `rebuild_init_argv()` also now use
+  raw `_uputw(0, argptr)` under `CONFIG_SPRINTER_EARLY_TRACE`, so the
+  next replay can tell whether the stop was specifically in the wrapper
+  validation path or in the lower-level user-page copy itself.
+- 2026-04-21: the next replay still stopped at `0123456`, which rules out
+  the validated `uput/uputp` wrapper as the active blocker.  For the next
+  step PID1 no longer stages `"/init"` / `argv[]` in user RAM at all under
+  `CONFIG_SPRINTER_EARLY_TRACE`: `complete_init()` now hands `_execve()`
+  kernel-resident `"/init"`, `argv[]`, and `envp[]` with `u_sysio = 1`.
+  `filesys.c:n_open()` and `syscall_exec.c:rargs()` gained the minimal
+  corresponding early path so `_execve()` can consume those kernel-side
+  pointers without going through the fragile first user-memory handoff.
+- 2026-04-21: one more replay still showed `0123456`, which means the
+  boot was dying before that new kernel-side `_execve()` handoff became
+  relevant.  The remaining active touchpoint was the original
+  `create_init()->add_argument("/init")`.  Under
+  `CONFIG_SPRINTER_EARLY_TRACE` that call is now skipped entirely, so
+  PID1 should finally advance past marker `6` into `complete_init()`
+  and the real exec path.
+- 2026-04-21: the next replay reached `01234567`, which confirms
+  `create_init()` now runs to its previous tail.  The stop has moved to
+  the narrow window between returning from `create_init()` and the first
+  post-return marker at the callsite in `fuzix_main`.  The current image
+  therefore adds:
+  - `8` in the very end of `create_init()`
+  - `9` immediately after `create_init()` returns, before `A`
+  so the next replay can split “dies in the `create_init` epilogue” from
+  “dies after return in the caller”.
+- 2026-04-21: the following replay reached `012345678`, which proves
+  `create_init()` itself now runs to its end marker.  The remaining
+  stop was not the real C epilogue but the trailing early-trace
+  read-back probe (`EARLY_TRACE(0xCA)` plus six `ugetc()` reads of the
+  staged `"/init"` bytes) that still executed after marker `8`.
+  That probe has now been removed so the next replay can distinguish a
+  genuine return-path fault (`012345678` only) from a successful return
+  into the caller (`0123456789...`).
+- 2026-04-21: the next replay reached `0123456789AB`, which confirms
+  both the return from `create_init()` and `device_init()` now succeed.
+  The active blocker has therefore moved strictly into the root mount
+  path before marker `C`.  The current image adds a finer split there:
+  - `E` after `get_root_dev()`
+  - `F` after the `BAD_ROOT_DEV` fallback check
+  - `G` immediately after `fmount()` returns
+  - `H` on the `m == NULL` error path before `panic(PANIC_NOROOT)`
+  so the next replay can separate “dies before `fmount()`”, “dies inside
+  `fmount()`”, and “returns from `fmount()` but fails on the error
+  branch”.
+- 2026-04-21: the next replay reached `0123456789ABEF`, which narrows
+  the failure to inside `fmount()` itself before any return to the
+  caller.  The current image therefore adds direct-VRAM markers inside
+  `fmount()`:
+  - `J` after `newfstab()`
+  - `K` after `bread(dev, 1, 0)` returns
+  - `L` after the superblock validity checks pass
+  - `M` immediately before returning success
+  so the next replay can isolate whether the stop is in `newfstab()`,
+  `bread()`, superblock decode/validation, or the final `sync()` tail.
+- 2026-04-21: the next replay reached `0123456789ABEFJ`, which proves
+  `newfstab()` succeeds and the active blocker has moved into the first
+  root superblock read, i.e. `bread(dev, 1, 0)` or lower.  The current
+  image therefore adds direct-VRAM markers in the block-read path:
+  - `N` after `freebuf()` in `bread()`
+  - `O` after `bdread()` returns `BLKSIZE`
+  - `P` after `validchk(dev, PANIC_BDR)`
+  - `Q` after `bdsetup()`
+  - `R` immediately after the underlying `td_read()` / `dev_read()`
+    call returns
+  so the next replay can separate buffer-cache setup, validity checks,
+  and the actual device block read path.
+- 2026-04-21: the next replay reached `0123456789ABEFJNPQ`, which
+  proves `bread()` allocates a buffer, `bdread()` passes `validchk()`,
+  and `bdsetup()` completes.  The active blocker is therefore already
+  inside the actual disk transfer path (`td_read -> td_transfer ->
+  ide_xfer` / `devide_read_data`).  The current image adds:
+  - `S` at the start of the transfer loop in `td_transfer()`
+  - `T` immediately before `ide_xfer()`
+  - `U` after a successful `ide_xfer()` iteration
+  - `V` after initial `ide_write(devh, devsel)`
+  - `W` after the initial `!BUSY` waits
+  - `X` after issuing the read command
+  - `Y` after DRQ becomes ready
+  - `Z` after `devide_read_data()` returns
+  so the next replay can split IDE setup, status polling, DRQ wait, and
+  the 512-byte PIO data transfer loop itself.
+
+## Current checkpoint
+
+The active goal is no longer generic "make `/init` survive".  The next
+checkpoint is to localise the early stop inside the narrow kernel boot
+path:
+
+`create_init -> makeproc(program_vectors) -> device_init -> fmount(root) -> i_open(root) -> OK -> exec_or_die`
+
+using only the new on-screen markers.
+
+The next expected replay outcomes are:
+
+- no `A`: failure before or during `create_init()`
+- `A` only: failure between `create_init()` and `device_init()`
+- `AB` only: failure before `get_root_dev()` / before the finer mount
+  split becomes visible
+- `ABE` only: failure after `get_root_dev()` returns
+- `ABEF` only: failure just before entering `fmount()`
+- `ABEFJ` only: failure after `newfstab()`
+- `ABEFJN` only: failure after `freebuf()` / early `bread()` setup
+- `ABEFJNP` only: failure after `validchk()` in `bdread()`
+- `ABEFJNPQ` only: failure after `bdsetup()`, inside the actual block
+  driver read
+- `ABEFJNPQR` only: underlying block read returned, blocker moved back
+  to `bread()` / `fmount()` tail
+- `ABEFJNPQS` only: failure at the start of `td_transfer()`
+- `ABEFJNPQST` only: failure just before `ide_xfer()`
+- `ABEFJNPQSTV` only: failure in the first IDE wait/setup phase
+- `ABEFJNPQSTVW` only: failure after the initial `!BUSY` waits
+- `ABEFJNPQSTVWX` only: failure after issuing the read command
+- `ABEFJNPQSTVWXY` only: failure after DRQ, inside the 512-byte data
+  transfer loop
+- `ABEFJNPQSTVWXYZ` only: PIO data transfer returned, blocker moved to
+  the post-transfer status wait / tail
+- `ABEFJK` only: failure after `bread(dev, 1, 0)` returns
+- `ABEFJKL` only: superblock validated, blocker moved to dirty-mark /
+  `sync()` tail
+- `ABEFJKLM` only: `fmount()` is about to return success, blocker moved
+  back to the caller path before `C`
+- `ABEFG` only: `fmount()` returned and the blocker moved to the first
+  post-mount branch
+- `ABEFGH` only: `fmount()` returned `NULL`, and the blocker is now in
+  the mount-failure / panic path
+- `ABC` only: failure in `i_open(root_dev, ROOTINODE)`
+- `ABCDOK`: handoff has moved past root open and the next blocker is
+  again in `exec_or_die()` / `/init`
+- `0123456` only: stop in `add_argument("/init")`
+- `01234567`: `create_init()` completed, blocker moved to later boot /
+  exec handoff
+- `012345678`: `create_init()` reached its final marker; if this still
+  appears after removing the trailing read-back probe then the blocker
+  is the actual return path from `create_init()`
+- `0123456789`: returned from `create_init()`, blocker moved to the
+  caller path before `device_init()`
+- `0123456789AB`: `device_init()` completed, blocker moved into the
+  root-device selection / mount path before the successful-mount marker
+  `C`
+
+The next replay after the `_COMMONMEM` `program_vectors()` fix should no
+longer stop with the last trace code `0xC2`.  Any visible progress past
+`Devboot` or a new later trace code means the self-unmap hypothesis was
+correct and the blocker has moved further down the boot path.
+
+Current baseline is now stable again at `0123456789ABEFJNPQSTVWXY`.  An
+attempt to add on-screen lowercase `a..e` markers inside
+`_devide_read_data()` regressed boot back to `0123`, so the next split
+must stay off the screen path.  The current image therefore uses the
+existing `_spr_rw_stage` / `_spr_rw_base` latches in common memory
+instead:
+
+- `_spr_rw_stage` at `0xFCB5`
+- `_spr_rw_base` at `0xFCB7`
+
+`_devide_read_data()` now writes:
+
+- `0xE4/0xE5/0xE6` on entry, encoding `td_raw == 0/1/2`, with
+  `_spr_rw_base = dptr`
+- `0xE1` after `map_buffers()` / `map_proc_always()` / `map_for_swap()`
+- `0xE2` after the first 256-byte half of the 512-byte PIO copy
+- `0xE3` after the full 512-byte copy and just before `map_kernel_restore`
+
+So the next focused dump for the IDE read blocker is:
+
+- screen, plus `0xFCB5-0xFCB8`
+
+Interpretation:
+
+- `stage=E4`: raw kernel-buffer path (`td_raw == 0`) is taken
+- `stage=E5`: blocker is on the `map_proc_always()` path
+- `stage=E6`: blocker is on the `map_for_swap()` path
+- `stage=E1`: fault in the first 256-byte half
+- `stage=E2`: fault in the second 256-byte half
+- `stage=E3`: copy finished, blocker moved to `map_kernel_restore()` or
+  the caller path above `_devide_read_data()`
+
+The latest latch dump finally narrowed the failing edge further: the
+stable replay still stops at `...ABEFJNPQSTVWXY`, but `_spr_rw_stage`
+already holds the entry marker, which means `_devide_read_data()` has
+actually started and dies before reaching the post-map checkpoint
+`0xE1`.
+
+The current image applies the narrowest possible test for that
+hypothesis:
+
+- in `_devide_read_data()`, when `td_raw == 0`, skip `map_buffers()`
+  entirely and read the 512-byte sector into the current kernel mapping
+  as-is
+- user (`td_raw == 1`) and swap (`td_raw == 2`) paths are unchanged
+- on exit, only call `map_kernel_restore()` if a remap actually
+  happened
+
+The next replay should therefore either move past `...XY` (ideally to
+`Z`, `K/L/M`, `C`, and then the later boot markers) or prove that the
+fault is not caused by the `map_buffers()` remap itself.
+
+That bypass turned out to be too intrusive in practice: the next replay
+regressed all the way back to `0123`, so it has been reverted.  The
+useful conclusion is only negative: simply skipping `map_buffers()` in
+`_devide_read_data()` is not a safe fix.  The working baseline therefore
+remains the image that reaches `0123456789ABEFJNPQSTVWXY`, and the next
+step must preserve that layout while probing the IDE read path more
+carefully.
+
+The next image applies the same hypothesis in a size-neutral way: on the
+`td_raw == 0` path inside `_devide_read_data()`, the single `call
+map_buffers` is replaced with three `nop`s, preserving code size and all
+subsequent addresses in `_COMMONMEM`.  This tests whether the kernel
+buffer read really dies because remapping WIN0..WIN2 to canonical kernel
+pages loses the live boot mapping, without reintroducing the earlier
+layout regression.
+
+That size-neutral test still stopped at `...ABEFJNPQSTVWXY`, so the
+simple `map_buffers()` remap hypothesis is now ruled out.  A first
+attempt to refine the branch latches with extra stores regressed boot
+back to `0123`, so that version was discarded.  The next image keeps the
+same stable layout and reuses the existing entry-stage bytes in
+`_devide_read_data()` to encode `td_raw` as `E4/E5/E6` without changing
+the overall code footprint in `_COMMONMEM`.
+
+The first replay of that `E4/E5/E6` image turned out to be invalid: the
+branch-marker experiment had a logic bug (`add a,#0xE4` before `cp #2`)
+that corrupted the `td_raw` test itself.  The image has now been fixed
+so `td_raw` is compared first and only then latched as `E4/E5/E6`,
+without reintroducing the earlier `_spr_rw_fd/_spr_rw_access` stores.
+
+The follow-up replay exposed a more important limitation in this debug
+approach: the `_spr_rw_*` bytes used for the branch markers live inside
+the active IM2 vector page at `0xFC00`, so writing them is itself unsafe
+and can perturb the interrupt page enough to regress boot back to
+`0123`. Those FCxx latch experiments are therefore no longer trusted as
+runtime evidence.
+
+The stable baseline remains the screen sequence:
+
+`0123456789ABEFJNPQSTVWXY`
+
+which means:
+
+- boot reaches `fmount()`
+- `bread(dev, 1, 0)` reaches `td_transfer()`
+- `ide_xfer()` reaches `DRQ ready`
+- the blocker sits in the final IDE bulk data path inside
+  `_devide_read_data()`
+
+Two negative results are now established:
+
+- simply skipping `map_buffers()` on the `td_raw == 0` path does not
+  move the failure, so the fault is not just the buffer remap itself
+- adding more FCxx latches corrupts the IM2 page and is not a valid way
+  to refine the trace further
+
+The current hypothesis is now platform-specific rather than mapping-only:
+Sprinter IDE bulk transfer appears to require Z80 block-I/O instructions
+(`INI/INIR` and `OUTI/OTIR`) rather than repeated single-byte
+`IN A,(C)` / `OUT (C),A` cycles. The local Sprinter manual explicitly
+describes IDE data transfer through `INI`/`OTIR`, and the BIOS HDD path
+uses `INI` loops for sector reads. The current image therefore switches
+`_devide_read_data()` to two `INIR` passes (512 bytes total) and
+`_devide_write_data()` to two `OTIR` passes, while also removing the
+unsafe `_spr_rw_*` writes from that path.
+
+That first `INIR/OTIR` image still stopped at the same `...XY`
+checkpoint, which rules out the simple "single-byte IN/OUT vs block I/O"
+hypothesis on its own.  The next hardware-specific constraint from the
+Sprinter manual is stronger: page switches must not happen during IDE
+transfer at all.  On this port that includes interrupt paths, because
+the IRQ/NMI handlers remap windows and would therefore violate the IDE
+transaction if they fire between `DRQ` and the end of the sector copy.
+
+The current image therefore wraps `_devide_read_data()` and
+`_devide_write_data()` in a narrow `DI ... transfer ... map_kernel_restore
+... EI` guard.  This keeps the page mapping stable for the full
+512-byte PIO transfer and matches the BIOS assumption that no mapper
+activity occurs while the IDE data path is active.
+
+A later attempt to follow the BIOS path even more literally by replacing
+the two `INIR` / `OTIR` passes with explicit `16 x INI/OUTI` inside a
+`32`-iteration loop turned out to be too disruptive in this kernel
+layout: the replay regressed immediately back to `0123`.  That variant
+has therefore been reverted.  The working comparison point remains the
+stable baseline screen sequence:
+
+`0123456789ABEFJNPQSTVWXY`
+
+which still localises the blocker to the post-`DRQ` bulk read path in
+`_devide_read_data()`.
+
+That `DI/EI` guard still leaves the machine at the same
+`...ABEFJNPQSTVWXY` checkpoint, so the blocker is no longer well
+explained by IRQ-driven page switches during the transfer.
+
+A follow-up split using extra in-band `a/b` screen markers inside
+`_devide_read_data()` turned out to be too intrusive: the replay
+regressed back to `0123`, so those extra calls have been removed and
+that result is discarded.
+
+The next platform-local fix follows the BIOS path more closely.  The
+BIOS HDD code uses explicit `INI` runs (16 `INI` × 32 iterations for
+512 bytes) rather than `INIR`, and likewise `OUTI` runs for writes.
+The current image therefore replaces the two `INIR`/`OTIR` passes in
+`_devide_read_data()` / `_devide_write_data()` with BIOS-style
+`INI`/`OUTI` loops while keeping the narrow `DI ... map ... transfer ...
+map_kernel_restore ... EI` guard intact.
+
+That BIOS-style `INI`/`OUTI` loop regressed the machine back to `0123`,
+so it has been discarded.  The new platform-local candidate keeps the
+working `INIR` transfer but routes the sector through a Sprinter-local
+256-byte bounce buffer in `_COMMONMEM`, in two 256-byte halves.  This
+preserves the stable baseline layout while removing direct IDE PIO
+stores into banked WIN0/WIN1/WIN2 memory, which is now the main
+remaining behavioural difference from the BIOS `PAGE3` transfer path.
+
+That bounce-buffer variant still leaves the machine at the same
+`...ABEFJNPQSTVWXY` checkpoint, so the remaining suspect is no longer
+the raw data path alone, but the entry/return ABI of the naked
+`_devide_read_data()` / `_devide_write_data()` helpers themselves.
+Generic `tinyide` uses the classic SDCC naked convention
+`pop ret / pop arg / push arg / push ret`; the Sprinter override had
+diverged to an `SP+4` fetch based on an earlier bring-up hypothesis.
+The current image restores the generic pop/push ABI while keeping the
+current transfer logic otherwise unchanged.

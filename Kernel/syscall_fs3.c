@@ -3,6 +3,25 @@
 #include <kdata.h>
 #include <printf.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t sprinter_dbg[];
+extern uint8_t spr_rdwr_stage;
+extern uint8_t spr_rdwr_reading;
+extern uint8_t spr_rdwr_fd;
+extern uint16_t spr_rdwr_base;
+extern uint16_t spr_rdwr_count;
+extern uint16_t spr_rdwr_argn;
+extern uint16_t spr_rdwr_argn1;
+extern uint16_t spr_rdwr_argn2;
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_rw_fd;
+extern uint16_t spr_rw_base;
+extern uint16_t spr_rw_count;
+extern uint8_t spr_rw_access;
+extern uint16_t spr_rw_mode;
+extern uint16_t spr_rw_dev;
+#endif
+
 
 /*******************************************
 open (name, flag, mode)           Function 1
@@ -122,6 +141,16 @@ arg_t _open(void)
 		/* get the static pointer back in case it changed via dev 
 		   usage or just because we blocked */
 		ino = *iptr;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rdwr_stage = 0xB0;
+		spr_rdwr_reading = (uint8_t)flag;
+		spr_rdwr_fd = (uint8_t)oftindex;
+		spr_rdwr_base = (uint16_t)(uarg_t)ino;
+		spr_rdwr_count = ino->c_magic;
+		spr_rdwr_argn = ino->c_dev;
+		spr_rdwr_argn1 = ino->c_num;
+		spr_rdwr_argn2 = ino->c_node.i_addr[0];
+#endif
 		i_lock(ino);
 	} else if (w && (flag & O_TRUNC) && getmode(ino) == MODE_R(F_REG)) {
 		/* O_TRUNC applied to a writeable ordinary file causes the
@@ -133,8 +162,24 @@ arg_t _open(void)
 			if (of_tab[j].o_inode == ino)
 				of_tab[j].o_ptr = 0;
 	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xB1;
+	spr_rw_fd = (uint8_t)uindex;
+	spr_rw_base = (uint16_t)(uarg_t)ino;
+	spr_rw_count = ino->c_magic;
+	spr_rw_access = (uint8_t)flag;
+	spr_rw_mode = ino->c_dev;
+	spr_rw_dev = ino->c_num;
+#endif
 	/* Link our file descriptor to the of table slot */
 	udata.u_files[uindex] = oftindex;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xB2;
+	spr_rw_base = (uint16_t)(uarg_t)ino;
+	spr_rw_count = ino->c_magic;
+	spr_rw_mode = ino->c_dev;
+	spr_rw_dev = ino->c_num;
+#endif
 	/* Set up the other fields in the of table */
 	of_tab[oftindex].o_ptr = 0;
 	of_tab[oftindex].o_access = flag;	/* Save the low bits only */
@@ -151,7 +196,37 @@ arg_t _open(void)
 	if (O_ACCMODE(flag) != O_WRONLY)
 		ino->c_readers++;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xB3;
+	spr_rw_base = (uint16_t)(uarg_t)ino;
+	spr_rw_count = ino->c_magic;
+	spr_rw_mode = ino->c_dev;
+	spr_rw_dev = ino->c_num;
+	sprinter_dbg[24] = 0xA1;
+	sprinter_dbg[25] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[26] = (uint8_t)(((uarg_t)ino) >> 8);
+	sprinter_dbg[27] = (uint8_t)ino->c_magic;
+	sprinter_dbg[28] = (uint8_t)(ino->c_magic >> 8);
+	sprinter_dbg[29] = (uint8_t)ino->c_dev;
+	sprinter_dbg[30] = (uint8_t)(ino->c_dev >> 8);
+#endif
+
 	i_unlock(ino);
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[24] = 0xA4;
+	sprinter_dbg[25] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[26] = (uint8_t)(((uarg_t)ino) >> 8);
+	sprinter_dbg[27] = (uint8_t)ino->c_magic;
+	sprinter_dbg[28] = (uint8_t)(ino->c_magic >> 8);
+	sprinter_dbg[29] = (uint8_t)ino->c_dev;
+	sprinter_dbg[30] = (uint8_t)(ino->c_dev >> 8);
+	spr_rw_stage = 0xB4;
+	spr_rw_base = (uint16_t)(uarg_t)ino;
+	spr_rw_count = ino->c_magic;
+	spr_rw_mode = ino->c_dev;
+	spr_rw_dev = ino->c_num;
+#endif
 
 	/* FIXME: ATIME ? */
 

@@ -2,6 +2,27 @@
 #include <version.h>
 #include <kdata.h>
 #include <printf.h>
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t spr_rdwr_stage;
+extern uint8_t spr_rdwr_reading;
+extern uint8_t spr_rdwr_fd;
+extern uint16_t spr_rdwr_base;
+extern uint16_t spr_rdwr_count;
+extern uint16_t spr_rdwr_argn;
+extern uint16_t spr_rdwr_argn1;
+extern uint16_t spr_rdwr_argn2;
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_va_stage;
+extern uint8_t sprinter_dbg[];
+extern uint8_t spr_gir;
+extern uint8_t spr_giu;
+extern uint8_t spr_gio;
+extern uint8_t spr_gifr;
+extern uint8_t spr_gifa;
+extern uint16_t spr_giin;
+extern uint16_t spr_gis;
+#endif
 #include <userstructs.h>
 
 void updoff(void)
@@ -158,6 +179,26 @@ int stcpy(inoptr ino, uint8_t *buf)
 
 arg_t _dup(void)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (oldd < UFTSIZE && udata.u_files[oldd] != NO_FILE) {
+		uint_fast8_t oftindex = udata.u_files[oldd];
+		inoptr ino = of_tab[oftindex].o_inode;
+
+		spr_gir = 0xA2;
+		spr_giu = oldd;
+		spr_gio = oftindex;
+		spr_giin = (uint16_t)(uarg_t)ino;
+		if (ino) {
+			spr_gifr = (uint8_t)ino->c_magic;
+			spr_gifa = (uint8_t)(ino->c_magic >> 8);
+			spr_gis = ino->c_dev;
+		} else {
+			spr_gifr = 0;
+			spr_gifa = 0;
+			spr_gis = 0;
+		}
+	}
+#endif
 	int_fast8_t newd;
 	if (getinode(oldd) == NULLINODE)
 		return (-1);
@@ -313,6 +354,13 @@ arg_t _pipe(void)
 	if ((oft2 = oft_alloc()) == -1)
 		goto nogood2;
 
+ #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[10] = 0x36;
+	sprinter_dbg[11] = (uint8_t)root_dev;
+	sprinter_dbg[12] = (uint8_t)(root_dev >> 8);
+	sprinter_dbg[13] = 0;
+	sprinter_dbg[14] = 0;
+#endif
 	if (!(ino = i_open(root_dev, 0))) {
 		oft_deref(oft2);
 		goto nogood2;
@@ -404,22 +452,46 @@ static arg_t readwrite(uint_fast8_t reading)
 	inoptr ino;
 	uint_fast8_t flag;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0;
+	spr_va_stage = 0;
+	spr_rdwr_stage = 1;
+	spr_rdwr_reading = reading;
+	spr_rdwr_fd = d;
+	spr_rdwr_base = (uint16_t)buf;
+	spr_rdwr_count = (uint16_t)nbytes;
+	spr_rdwr_argn = (uint16_t)udata.u_argn;
+	spr_rdwr_argn1 = (uint16_t)udata.u_argn1;
+	spr_rdwr_argn2 = (uint16_t)udata.u_argn2;
+#endif
 	if (!nbytes)
 		return 0;
 
 	if ((ssize_t)nbytes < 0) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rdwr_stage = 2;
+#endif
 		udata.u_error = EINVAL;
 	        return -1;
 	}
 
 	/* Reading from disk is writing to user space and vice versa... */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rdwr_stage = 3;
+#endif
 	if (!valaddr(buf, nbytes, reading))
 	        return -1;
 
 	/* Set up u_base, u_offset, ino; check permissions, file num. */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rdwr_stage = 4;
+#endif
 	if ((ino = rwsetup(reading, &flag)) == NULLINODE)
 		return -1;	/* bomb out if error */
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rdwr_stage = 5;
+#endif
 	(reading ? readi : writei)(ino, flag);
 	updoff();
 	i_unlock(ino);

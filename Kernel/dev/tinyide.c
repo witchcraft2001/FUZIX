@@ -7,6 +7,7 @@
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define IDE_TRACE(x) plt_trace(x)
+extern void sprinter_bootmark(char c);
 #else
 #define IDE_TRACE(x) do { } while (0)
 #endif
@@ -51,6 +52,9 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
     IDE_TRACE(0x88);
     IDE_TRACE(0x90);
     IDE_TRACE(devsel);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('V');
+#endif
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
     IDE_TRACE(0x94);
@@ -86,6 +90,9 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
       IDE_TRACE(ide_wait_last_status);
       return 0;
     }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('W');
+#endif
 
     /* FIXME upper 4 bits */
     ide_write(cylh, lba2);
@@ -111,6 +118,9 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
     }
     ide_write(cmd, is_read ? 0x20 : 0x30);
     IDE_TRACE(0x8A);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('X');
+#endif
     if (ide_wait_mask(0x08, 0x08)) {
       IDE_TRACE(0x84);
       IDE_TRACE(ide_wait_last_status);
@@ -118,10 +128,16 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
       IDE_TRACE(ide_read(error));
       return 0;
     }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('Y');
+#endif
     if (is_read)
       devide_read_data(dptr);
     else
       devide_write_data(dptr);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('Z');
+#endif
 
     IDE_TRACE(0x8B);
     if (ide_wait_mask(0x80, 0x00)) {

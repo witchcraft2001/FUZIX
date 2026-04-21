@@ -2,12 +2,25 @@
 #include <printf.h>
 #include <kdata.h>
 #include <stdarg.h>
+#include <tty.h>
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define DIO_TRACE(x) plt_trace(x)
 extern int td_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
 extern int td_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern uint16_t sprinter_last_validchk_dev;
+extern uint16_t sprinter_last_validchk_site;
+extern uint8_t sprinter_dbg[];
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_rw_fd;
+extern uint16_t spr_rw_base;
+extern uint16_t spr_rw_count;
+extern uint8_t spr_rw_access;
+extern uint16_t spr_rw_mode;
+extern uint16_t spr_rw_dev;
+extern void sprinter_restore_devsw(void);
+#define DIO_PTR16(p) ((uint16_t)(uarg_t)(p))
 #else
 #define DIO_TRACE(x) do { } while (0)
 #endif
@@ -18,6 +31,10 @@ void validchk(uint16_t dev, const char *p)
 {
 	(void)p;
         if (!validdev(dev)) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+                sprinter_last_validchk_dev = dev;
+                sprinter_last_validchk_site = DIO_PTR16(p);
+#endif
                 DIO_TRACE(0xDD);
                 DIO_TRACE((uint8_t)dev);
                 DIO_TRACE((uint8_t)(dev >> 8));
@@ -85,6 +102,10 @@ static void bunlock(bufptr bp)
 
 #endif
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void sprinter_bootmark(char c);
+#endif
+
 /*
  *	Make an entry in the buffer cache and fill it. If rewrite is
  *	set then we are not keeping any of the old data but overwriting
@@ -102,6 +123,9 @@ bufptr bread(uint16_t dev, blkno_t blk, bool rewrite)
 		DIO_TRACE(0x65);
 		bp = freebuf();
 		DIO_TRACE(0x66);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_bootmark('N');
+#endif
 		bp->bf_dev = dev;
 		bp->bf_blk = blk;
 
@@ -118,6 +142,9 @@ bufptr bread(uint16_t dev, blkno_t blk, bool rewrite)
 				bunlock(bp);
 				return (NULL);
 			}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			sprinter_bootmark('O');
+#endif
 		}
 	}
 	else
@@ -366,21 +393,32 @@ static void bdsetup(bufptr bp)
 int bdread(bufptr bp)
 {
 	uint16_t dev = bp->bf_dev;
+	int ret;
 	DIO_TRACE(0x60);
 	DIO_TRACE((uint8_t)dev);
 	DIO_TRACE(0x61);
 	DIO_TRACE((uint8_t)(dev >> 8));
 	validchk(dev, PANIC_BDR);
 	DIO_TRACE(0x62);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('P');
+#endif
 	bdsetup(bp);
 	DIO_TRACE(0x63);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('Q');
 	if (major(dev) == 0) {
 		DIO_TRACE(0x6E);
-		return td_read(minor(dev), 0, 0);
+		ret = td_read(minor(dev), 0, 0);
+		sprinter_bootmark('R');
+		return ret;
 	}
-#endif
+	ret = ((*dev_tab[major(dev)].dev_read) (minor(dev), 0, 0));
+	sprinter_bootmark('R');
+	return ret;
+#else
 	return ((*dev_tab[major(dev)].dev_read) (minor(dev), 0, 0));
+#endif
 }
 
 int bdwrite(bufptr bp)
@@ -411,16 +449,65 @@ int cdread(uint16_t dev, uint_fast8_t flag)
 int cdwrite(uint16_t dev, uint_fast8_t flag)
 {
 	validchk(dev, PANIC_CDW);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xC3;
+	spr_rw_fd = (uint8_t)flag;
+	spr_rw_base = dev;
+	spr_rw_count = (uint16_t)udata.u_count;
+	spr_rw_access = (uint8_t)major(dev);
+	spr_rw_mode = (uint16_t)minor(dev);
+#endif
 	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 1, flag));
 }
 
 int d_open(uint16_t dev, uint_fast8_t flag)
 {
+	uint_fast8_t maj;
+	uint_fast8_t min;
+	struct devsw *dp;
+	int (*fn)(uint_fast8_t minor, uint16_t flag);
+
 	if (!validdev(dev)) {
 	        udata.u_error = ENXIO;
 		return -1;
         }
-	return ((*dev_tab[major(dev)].dev_open) (minor(dev), flag));
+	maj = major(dev);
+	min = minor(dev);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (maj == 2) {
+		fn = tty_open;
+		sprinter_dbg[9] = 0xDB;
+		sprinter_dbg[4] = min;
+		sprinter_dbg[5] = maj;
+		sprinter_dbg[6] = (uint8_t)(uaddr_t)fn;
+		sprinter_dbg[7] = (uint8_t)(((uaddr_t)fn) >> 8);
+		sprinter_dbg[8] = 0xD0;
+		dev = fn(min, flag);
+		sprinter_dbg[8] = 0xD1;
+		return dev;
+	}
+#endif
+	dp = &dev_tab[maj];
+	fn = dp->dev_open;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (maj == 2 && DIO_PTR16(fn) < 0x4000) {
+		sprinter_dbg[9] = 0xDA;
+		sprinter_restore_devsw();
+		dp = &dev_tab[maj];
+		fn = dp->dev_open;
+	} else
+		sprinter_dbg[9] = 0x00;
+	sprinter_dbg[4] = (uint8_t)dev;
+	sprinter_dbg[5] = maj;
+	sprinter_dbg[6] = (uint8_t)(uaddr_t)fn;
+	sprinter_dbg[7] = (uint8_t)(((uaddr_t)fn) >> 8);
+	sprinter_dbg[8] = 0xD0;
+#endif
+	dev = fn(min, flag);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[8] = 0xD1;
+#endif
+	return dev;
 }
 
 int d_close(uint16_t dev)

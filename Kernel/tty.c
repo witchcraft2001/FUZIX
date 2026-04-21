@@ -4,6 +4,16 @@
 #include <stdbool.h>
 #include <tty.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_rw_fd;
+extern uint16_t spr_rw_base;
+extern uint16_t spr_rw_count;
+extern uint8_t spr_rw_access;
+extern uint16_t spr_rw_mode;
+extern uint16_t spr_rw_dev;
+#endif
+
 /*
  *	Minimal Terminal Interface
  *
@@ -109,10 +119,24 @@ int tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 
 	used(rawflag);
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xC4;
+	spr_rw_fd = (uint8_t)minor;
+	spr_rw_base = (uint16_t)(uarg_t)udata.u_base;
+	spr_rw_count = (uint16_t)udata.u_count;
+	spr_rw_access = (uint8_t)flag;
+#endif
+
 	if (!valaddr_r(udata.u_base, udata.u_count))
 		return -1;
 
 	t = &ttydata[minor];
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xC5;
+	spr_rw_mode = (uint16_t)t->flag;
+	spr_rw_dev = (uint16_t)t->termios.c_oflag;
+#endif
 
 	while (udata.u_done != udata.u_count) {
 		for (;;) {	/* Wait on the ^S/^Q flag */
@@ -143,6 +167,12 @@ int tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 				c = *udata.u_base;
 			else
 				c = _ugetc(udata.u_base);
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			spr_rw_stage = 0xC6;
+			spr_rw_count = (uint16_t)udata.u_done;
+			spr_rw_mode = (uint16_t)c;
+#endif
 
 			if (t->termios.c_oflag & OPOST) {
 				if (c == '\n' && (t->termios.c_oflag & ONLCR)) {

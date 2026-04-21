@@ -6,6 +6,7 @@
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define FM_TRACE(x) plt_trace(x)
+extern void sprinter_bootmark(char c);
 extern uint16_t sprinter_last_ideref_in;
 extern uint16_t sprinter_last_ideref_post;
 extern uint16_t sprinter_last_ideref_wr;
@@ -19,6 +20,15 @@ extern uint16_t sprinter_last_newfile_nindex_prewr;
 extern uint16_t sprinter_last_iopen_dev;
 extern uint16_t sprinter_last_iopen_ino;
 extern uint16_t sprinter_last_iopen_ret;
+extern uint8_t sprinter_last_iopen_bad;
+extern uint16_t sprinter_last_iopen_mode;
+extern uint16_t sprinter_last_iopen_nlink;
+extern uint16_t sprinter_bad_iopen_dev;
+extern uint16_t sprinter_bad_iopen_ino;
+extern uint8_t sprinter_bad_iopen_bad;
+extern uint16_t sprinter_bad_iopen_mode;
+extern uint16_t sprinter_bad_iopen_nlink;
+extern uint8_t sprinter_dbg[];
 extern uint8_t sprinter_chlink_stage;
 extern uint16_t sprinter_chlink_wd;
 extern uint16_t sprinter_chlink_nindex;
@@ -131,23 +141,37 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
     if (parent)
         *parent = NULLINODE;
 
-    /* Check the user address and length. If it's shorter than 512 bytes this
-       is fine, but set nameeend accordingly. This allows us to use _ugetc
-       in the hot path which saves us a ton of cycles */
-    len = valaddr_r(namep, 512);
-    if (len == 0)
-        return NULLINODE;
-
-    name = namep;
-    nameend = namep + len;
-    n_open_fault = 0;
-
-    /* What error do we return if we hit nameend - are we overlong, or out
-       of memory space */
-    if (len == 512)
+    /*
+     * Sprinter early bring-up can hand _execve() a kernel-resident
+     * "/init" path via u_sysio to bypass the fragile initial argv/user
+     * staging. In that case stay in a bounded 512-byte direct read path
+     * instead of validating a userspace pointer.
+     */
+    if (udata.u_sysio) {
+        len = 512;
+        name = namep;
+        nameend = namep + len;
+        n_open_fault = 0;
         n_fault_type = ENAMETOOLONG;
-    else
-        n_fault_type = EACCES;
+    } else {
+        /* Check the user address and length. If it's shorter than 512 bytes this
+           is fine, but set nameeend accordingly. This allows us to use _ugetc
+           in the hot path which saves us a ton of cycles */
+        len = valaddr_r(namep, 512);
+        if (len == 0)
+            return NULLINODE;
+
+        name = namep;
+        nameend = namep + len;
+        n_open_fault = 0;
+
+        /* What error do we return if we hit nameend - are we overlong, or out
+           of memory space */
+        if (len == 512)
+            n_fault_type = ENAMETOOLONG;
+        else
+            n_fault_type = EACCES;
+    }
 
     if(getcf() == '/')
         wd = udata.u_root;
@@ -304,6 +328,13 @@ inoptr srch_dir(register inoptr wd, uint8_t *compname)
                 inum = d->d_ino;
                 brelse(buf);
                 i_unlock(wd);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+                sprinter_dbg[10] = 0x31;
+                sprinter_dbg[11] = (uint8_t)wd->c_dev;
+                sprinter_dbg[12] = (uint8_t)(wd->c_dev >> 8);
+                sprinter_dbg[13] = (uint8_t)inum;
+                sprinter_dbg[14] = (uint8_t)(inum >> 8);
+#endif
                 return i_open(wd->c_dev, inum);
             }
         }
@@ -327,6 +358,13 @@ inoptr srch_mt(register inoptr ino)
     for(j=0; j < NMOUNTS; ++j){
         if(m->m_dev != NO_DEVICE &&  m->m_mntpt == ino) {
             i_deref(ino);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+            sprinter_dbg[10] = 0x32;
+            sprinter_dbg[11] = (uint8_t)m->m_dev;
+            sprinter_dbg[12] = (uint8_t)(m->m_dev >> 8);
+            sprinter_dbg[13] = ROOTINODE;
+            sprinter_dbg[14] = 0;
+#endif
             return i_open(m->m_dev, ROOTINODE);
         }
         m++;
@@ -353,9 +391,17 @@ inoptr i_open(register uint16_t dev, uint16_t ino)
     bool isnew = false;
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[10] = 0x33;
+    sprinter_dbg[11] = (uint8_t)dev;
+    sprinter_dbg[12] = (uint8_t)(dev >> 8);
+    sprinter_dbg[13] = (uint8_t)ino;
+    sprinter_dbg[14] = (uint8_t)(ino >> 8);
     sprinter_last_iopen_dev = dev;
     sprinter_last_iopen_ino = ino;
     sprinter_last_iopen_ret = 0;
+    sprinter_last_iopen_bad = 0;
+    sprinter_last_iopen_mode = 0;
+    sprinter_last_iopen_nlink = 0;
 #endif
 
     validchk(dev, PANIC_IOPEN);
@@ -420,6 +466,14 @@ found:
 badino:
     kputs("i_open: bad disk inode\n");
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_last_iopen_bad = isnew ? 2 : 1;
+    sprinter_last_iopen_mode = nindex->c_node.i_mode;
+    sprinter_last_iopen_nlink = nindex->c_node.i_nlink;
+    sprinter_bad_iopen_dev = dev;
+    sprinter_bad_iopen_ino = ino;
+    sprinter_bad_iopen_bad = sprinter_last_iopen_bad;
+    sprinter_bad_iopen_mode = sprinter_last_iopen_mode;
+    sprinter_bad_iopen_nlink = sprinter_last_iopen_nlink;
     sprinter_last_iopen_ret = 0;
 #endif
     return NULLINODE;
@@ -634,6 +688,13 @@ inoptr newfile(register inoptr pino, uint8_t *name)
         goto nogood;
     }
 
+ #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[10] = 0x34;
+    sprinter_dbg[11] = (uint8_t)pino->c_dev;
+    sprinter_dbg[12] = (uint8_t)(pino->c_dev >> 8);
+    sprinter_dbg[13] = 0;
+    sprinter_dbg[14] = 0;
+#endif
     if (!(nindex = i_open(pino->c_dev, 0))) {
         udata.u_error = ENFILE;
         goto nogood;
@@ -1470,6 +1531,9 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
 
     m = newfstab();
     FM_TRACE(0x5B);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('J');
+#endif
     if (m == NULL) {
         udata.u_error = EMFILE;
         FM_TRACE(0x53);
@@ -1482,6 +1546,9 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     FM_TRACE(0x5C);
     buf = bread(dev, 1, 0);
     FM_TRACE(0x5D);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('K');
+#endif
     if (buf == NULL) {
         FM_TRACE(0x54);
         FM_TRACE((uint8_t)udata.u_error);
@@ -1533,6 +1600,9 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
         FM_TRACE(0x55);
         return NULL;
     }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('L');
+#endif
 
     if (fp->s_fmod == FMOD_DIRTY) {
         kputs("warning: mounting dirty file system, forcing r/o.\n");
@@ -1554,6 +1624,9 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     sync();
 
     FM_TRACE(0x56);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_bootmark('M');
+#endif
 
     return m;
 }

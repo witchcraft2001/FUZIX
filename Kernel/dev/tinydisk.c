@@ -19,6 +19,7 @@ extern int ide_xfer(uint_fast8_t unit, bool is_read, uint32_t lba, uint8_t *dptr
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define TD_TRACE(x) plt_trace(x)
+extern void sprinter_bootmark(char c);
 #else
 #define TD_TRACE(x) do { } while (0)
 #endif
@@ -87,15 +88,24 @@ static int td_transfer(uint8_t minor, bool is_read, uint8_t rawflag)
 	dptr = udata.u_dptr;
 	nblock = udata.u_nblock;
 	TD_TRACE(0x7E);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('S');
+#endif
 	while (ct < nblock) {
 		TD_TRACE(0x72);
 		if (dev == 0) {
 			TD_TRACE(0x7A);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			sprinter_bootmark('T');
+#endif
 			if (ide_xfer(td_unit[dev], is_read, lba, dptr) == 0)
 				goto error;
 		} else if (td_op[dev] (td_unit[dev], is_read, lba, dptr) == 0)
 			goto error;
 		TD_TRACE(0x73);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_bootmark('U');
+#endif
 		ct++;
 		dptr += 512;
 		lba++;

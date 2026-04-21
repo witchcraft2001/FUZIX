@@ -16,6 +16,7 @@
 extern void plt_trace(uint8_t code);
 extern uint16_t sprinter_last_panic_ptr;
 extern uint8_t sprinter_last_panic_bytes[4];
+extern uint8_t spr_rw_stage;
 #define PROC_TRACE(x) plt_trace(x)
 #else
 #define PROC_TRACE(x) do { } while (0)
@@ -31,6 +32,9 @@ extern uint8_t sprinter_last_panic_bytes[4];
 static void do_psleep(void *event, uint_fast8_t state)
 {
 	di();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD0;
+#endif
 #ifdef DEBUG_SLEEP
 	kprintf("psleep(0x%p)", event);
 #endif
@@ -124,6 +128,9 @@ void switchout(void)
 	kprintf("switchout %d\n", udata.u_ptab->p_status);
 #endif
 	di();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD1;
+#endif
 
 	/* We do the accounting in switchout as it's cheaper and easier to
 	   do it once. Useful trick borrowed from Linux */
@@ -146,6 +153,9 @@ void switchout(void)
 	/* If we have a signal we need to get to processing them we keep
 	   running until it happens */
 	if (chksigs()) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 0xD2;
+#endif
 		if (udata.u_ptab->p_status > P_READY)
 			nready++;
 		udata.u_ptab->p_status = P_RUNNING;
@@ -156,6 +166,9 @@ void switchout(void)
 	/* When we are idle we twiddle our thumbs here until a polled event
 	   in plt_idle or an interrupt wakes someone up */
 	while (nready == 0) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_rw_stage = 0xD3;
+#endif
 		/* We are idle, we cannot sleep by calling psleep */
 		ei();
 		plt_idle();
@@ -166,6 +179,9 @@ void switchout(void)
 	   are waiting for input while mostly system idle */
 	if (udata.u_ptab->p_status == P_RUNNING || udata.u_ptab->p_status == P_READY) {
 		if (nready == 1) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			spr_rw_stage = 0xD4;
+#endif
 			udata.u_ptab->p_status = P_RUNNING;
 			ei();
 			return;
@@ -173,6 +189,9 @@ void switchout(void)
 		udata.u_ptab->p_status = P_READY;
 	}
 	/* We probably need to run something else */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD5;
+#endif
 	plt_switchout();
 }
 
@@ -1182,7 +1201,22 @@ void swap_in(ptptr proc)
 void exec_or_die(void)
 {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	static const uint8_t sprinter_probe[] = { 0x18, 0xFE };
+	extern uint16_t sprinter_last_exec_base;
+	extern uint16_t sprinter_last_exec_count;
+	extern uint16_t sprinter_last_exec_top;
+	extern uint8_t sprinter_last_exec_upage[4];
+	extern uint8_t sprinter_last_exec_ptab[4];
+	/*
+	 * Sprinter bring-up: the previous exec_or_die shims (raw probe,
+	 * in-place realloc, fresh pagemap_alloc) all became suspects for the
+	 * current pre-exec trap.  Leave only a passive kernel-side snapshot
+	 * here and follow the stock _execve() path unchanged.
+	 */
+	sprinter_last_exec_base = 0;
+	sprinter_last_exec_count = 0;
+	sprinter_last_exec_top = udata.u_top;
+	memcpy(sprinter_last_exec_upage, &udata.u_page, 4);
+	memcpy(sprinter_last_exec_ptab, &udata.u_ptab->p_page, 4);
 #endif
 #ifdef CONFIG_SWAPPER
 	irqflags_t irq;
@@ -1202,15 +1236,18 @@ void exec_or_die(void)
 	kputs("Starting /init\n");
 	#ifdef CONFIG_SPRINTER_EARLY_TRACE
 	/*
-	 * Sprinter bring-up fallback: bypass exec/filesystem/libc entirely and
-	 * jump into a 2-byte user-space loop. This proves whether the bare
-	 * kernel->userspace transition itself is stable.
+	 * Sprinter bring-up: complete_init() already prepared argv/envp in the
+	 * fresh PID1 address space. Touching user memory again here adds one
+	 * more pre-exec write path and has repeatedly become a suspect for the
+	 * trap before the first stable /init syscall.
 	 */
-	uput(sprinter_probe, (void *)PROGLOAD, sizeof(sprinter_probe));
-	udata.u_isp = PROGTOP - 2;
-	udata.u_cursig = 0;
-	kputs("SPRINTER RAW USER PROBE\n");
-	doexec(PROGLOAD);
+	udata.u_page = udata.u_ptab->p_page;
+	udata.u_page2 = udata.u_ptab->p_page2;
+	sprinter_last_exec_base = 0;
+	sprinter_last_exec_count = 0;
+	sprinter_last_exec_top = udata.u_top;
+	memcpy(sprinter_last_exec_upage, &udata.u_page, 4);
+	memcpy(sprinter_last_exec_ptab, &udata.u_ptab->p_page, 4);
 	#endif
 	plt_discard();
 	_execve();

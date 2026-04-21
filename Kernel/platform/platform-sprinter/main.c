@@ -10,6 +10,10 @@
 #include <tinydisk.h>
 #include <rtc.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t spr_rw_stage;
+#endif
+
 __sfr __at 0x1D cmos_adr;
 __sfr __at 0x1C cmos_dat_r;
 
@@ -27,8 +31,23 @@ void plt_idle(void)
 	 * tty/timer directly from the idle loop until the kernel IRQ
 	 * path is fully plumbed.
 	 */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD6;
+	/*
+	 * Early Sprinter bring-up still sees spurious bytes on the PS/2
+	 * receive path. Feeding them into tty_inproc() produces random
+	 * shell input and eventually bogus i_open()/validchk() panics.
+	 * Keep idle time moving via the software timer, but suppress
+	 * keyboard polling until the SIO/keyboard init is stable.
+	 */
+	spr_rw_stage = 0xD7;
+#else
 	kbd_poll();
+#endif
 	timer_interrupt();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD8;
+#endif
 }
 
 uint_fast8_t plt_param(unsigned char *p)
@@ -51,7 +70,9 @@ void plt_interrupt(void)
 	 * acknowledgement is understood.
 	 */
 	timer_interrupt();
+#ifndef CONFIG_SPRINTER_EARLY_TRACE
 	kbd_poll();
+#endif
 }
 
 /*

@@ -3,11 +3,24 @@
 #include <kdata.h>
 #include <printf.h>
 #include <tty.h>
+#include <vt.h>
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
 #define EARLY_TRACE(x) plt_trace(x)
 extern void sprinter_force_bank1(void);
+extern uint8_t spr_boot_count;
+extern uint8_t sprinter_dbg[];
+extern arg_t _open(void);
+extern arg_t _dup(void);
+void sprinter_bootmark(char c)
+{
+	static uint8_t x;
+
+	plot_char(7, x, (uint16_t)c);
+	if (x < 79)
+		x++;
+}
 #else
 #define EARLY_TRACE(x) do { } while (0)
 #endif
@@ -76,11 +89,62 @@ void fstabinit(void)
 static uaddr_t progptr, old_progptr;
 static uaddr_t argptr, old_argptr;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+static const uint8_t sprinter_init_path[] = "/init";
+static uint8_t *const sprinter_init_argv[] = {
+	(uint8_t *)sprinter_init_path,
+	NULL
+};
+static uint8_t *const sprinter_init_envp[] = {
+	NULL
+};
+
+static void sprinter_prepare_init_stdio(void)
+{
+	static const char tty1_path[] = "/dev/tty1";
+	uint8_t old_sysio = udata.u_sysio;
+	uint8_t *old_base = udata.u_base;
+	arg_t old_argn = udata.u_argn;
+	arg_t old_argn1 = udata.u_argn1;
+	arg_t old_argn2 = udata.u_argn2;
+	arg_t fd;
+
+	udata.u_sysio = 1;
+	udata.u_base = (uint8_t *)tty1_path;
+	udata.u_argn = (arg_t)tty1_path;
+	udata.u_argn1 = O_RDWR;
+	udata.u_argn2 = 0;
+	fd = _open();
+	if ((int16_t)fd >= 0) {
+		udata.u_argn = fd;
+		_dup();
+		udata.u_argn = fd;
+		_dup();
+	}
+	udata.u_sysio = old_sysio;
+	udata.u_base = old_base;
+	udata.u_argn = old_argn;
+	udata.u_argn1 = old_argn1;
+	udata.u_argn2 = old_argn2;
+}
+#endif
+
 void add_argument(const char *s)
 {
 	int l = strlen(s) + 1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Sprinter bring-up: PID1 still trips in the validated uput/uputp
+	 * wrapper path while staging the initial "/init" argv.  Use the
+	 * raw usermem helpers here so we exercise only the banked copy path
+	 * itself and move the next failure edge forward.
+	 */
+	_uput((const uint8_t *)s, (uint8_t *)progptr, l);
+	_uputw((uint16_t)progptr, (uint16_t *)argptr);
+#else
 	uput(s, (void *)progptr, l);
 	uputp(progptr, (void *)argptr);
+#endif
 	progptr += ((l + 3) & ~3);
 	argptr += sizeof(uptr_t);
 }
@@ -90,12 +154,27 @@ void create_init(void)
 	register uint8_t *j, *e;
 	EARLY_TRACE(0xC1);
 
+	/*
+	 * Sprinter bring-up: the historical one-page bootstrap map
+	 * (PROGLOAD + 512) leaves PID1 with a degenerate page table until
+	 * _execve() grows it, and on Sprinter the handoff already trips
+	 * over mixed 0x08/0x49/0x4A mappings before that path stabilises.
+	 * Start init with a full user map so the first exec/open path
+	 * always sees a canonical 4-page process layout.
+	 */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	udata.u_top = PROGTOP;
+#else
 	udata.u_top = PROGLOAD + 512;	/* Plenty for the boot */
+#endif
 	init_process = ptab_alloc();
 	udata.u_ptab = init_process;
 	init_process->p_top = udata.u_top;
 	map_init();
 	EARLY_TRACE(0xC2);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('4');
+#endif
 
 	/* wipe file table */
 	e = udata.u_files + UFTSIZE;
@@ -104,6 +183,9 @@ void create_init(void)
 
 	makeproc(init_process, &udata);
 	EARLY_TRACE(0xC3);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('5');
+#endif
 
 	udata.u_insys = 1;
 	init_process->p_status = P_RUNNING;
@@ -114,35 +196,66 @@ void create_init(void)
 	argptr = PROGLOAD;
 	progptr = PROGLOAD + 256;
 
+	/*
+	 * Sprinter bring-up: the first PID1 user-space bulk zero still
+	 * traps before the argv handoff.  This scratch area is immediately
+	 * overwritten by add_argument("/init") and later argv terminators,
+	 * so skipping the pre-clear under early trace lets boot advance to
+	 * the next real handoff edge without affecting other targets.
+	 */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+#else
 	uzero((void *)progptr, 32);
+#endif
 	EARLY_TRACE(0xC4);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('6');
+#else
 	add_argument("/init");
+#endif
 	EARLY_TRACE(0xC5);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/* Read back the bytes we just wrote via ugetc.  If this shows
-	 * "/init\0" (0x2F 0x69 0x6E 0x69 0x74 0x00) the user-space
-	 * mapping is working end-to-end; if it shows something else the
-	 * uput path in add_argument didn't actually reach the u_page that
-	 * ugetc later reads from in _execve. */
-	EARLY_TRACE(0xCA);
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 256)));
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 257)));
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 258)));
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 259)));
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 260)));
-	EARLY_TRACE((uint8_t)ugetc((void *)(PROGLOAD + 261)));
-	EARLY_TRACE(0xCB);
+	sprinter_bootmark('7');
+	EARLY_TRACE(0xC6);
+	sprinter_bootmark('8');
 #endif
 }
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+void rebuild_init_argv(void)
+{
+	argptr = PROGLOAD;
+	progptr = PROGLOAD + 256;
+	uzero((void *)progptr, 32);
+	add_argument("/init");
+	_uputw(0, (uint16_t *)argptr);
+	udata.u_argn2 = (arg_t)argptr;
+	udata.u_argn = (arg_t)PROGLOAD + 256;
+	udata.u_argn1 = (arg_t)PROGLOAD;
+}
+#endif
+
 void complete_init(void)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Sprinter bring-up: the initial PID1 user-space argv staging still
+	 * traps in add_argument()/uput before the real exec loader starts.
+	 * Hand _execve() kernel-resident "/init", argv[] and envp[] under
+	 * u_sysio so the next failure edge moves into the actual exec path.
+	 */
+	udata.u_sysio = 1;
+	udata.u_argn2 = (arg_t)sprinter_init_envp;
+	udata.u_argn = (arg_t)sprinter_init_path;
+	udata.u_argn1 = (arg_t)sprinter_init_argv;
+#else
 	/* Terminate argv, also use this as the env ptr */
 	uputp(0, (void *)argptr);
 	/* Set up things to look like the process is calling _execve() */
 	udata.u_argn2 = (arg_t)argptr; /* Environment (none) */
 	udata.u_argn =  (arg_t)PROGLOAD + 256; /* "/init" */
 	udata.u_argn1 = (arg_t)PROGLOAD; /* Arguments */
+#endif
 	EARLY_TRACE(0xE8);
 	EARLY_TRACE((uint8_t)udata.u_argn);
 	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
@@ -368,6 +481,9 @@ void fuzix_main(void)
 {
 	struct mount *m;
 	uint16_t tty_open_rc;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_boot_count++;
+#endif
 	/* setup state */
 	udata.u_ininterrupt = 0;
 	udata.u_insys = true;
@@ -381,7 +497,9 @@ void fuzix_main(void)
 	EARLY_TRACE(0x12);
 
 	EARLY_TRACE(0xD0);
+	#ifdef CONFIG_SPRINTER_EARLY_TRACE
 	sprinter_force_bank1();
+	#endif
 
 	EARLY_TRACE(0x13);
 	tty_open_rc = d_open(TTYDEV, 0);
@@ -406,6 +524,9 @@ void fuzix_main(void)
 			"Copyright (c) 2013-2015 Will Sowerbutts <will@sowerbutts.com>\n"
 			"Copyright (c) 2014-2025 Alan Cox <alan@etchedpixels.co.uk>\nDevboot\n",
 			sysinfo.uname);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('0');
+#endif
 
 	set_cpu_type();
 	sysinfo.cpu[0] = sys_cpu_feat;
@@ -432,12 +553,25 @@ void fuzix_main(void)
 
 	bufinit();
 	EARLY_TRACE(0x21);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('1');
+#endif
 	fstabinit();
 	EARLY_TRACE(0x22);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('2');
+#endif
 	pagemap_init();
 	EARLY_TRACE(0x23);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('3');
+#endif
 	create_init();
 	EARLY_TRACE(0x24);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('9');
+	sprinter_bootmark('A');
+#endif
 
 	/* Parameters message (temporarily suppressed during sprinter bring-up) */
 	EARLY_TRACE(0x25);
@@ -456,6 +590,9 @@ void fuzix_main(void)
 	/* initialise hardware devices */
 	device_init();
 	EARLY_TRACE(0x30);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('B');
+#endif
 
 	do {
 		static uint8_t mount_tries;
@@ -468,16 +605,25 @@ void fuzix_main(void)
             EARLY_TRACE((uint8_t)root_dev);
 		EARLY_TRACE(0x3E);
 		EARLY_TRACE((uint8_t)(root_dev >> 8));
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_bootmark('E');
+#endif
             if (root_dev == BAD_ROOT_DEV) {
 			EARLY_TRACE(0x33);
 			root_dev = 1;
 			EARLY_TRACE(0x3B);
             }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_bootmark('F');
+#endif
             /* Mount the root device */
 		EARLY_TRACE(0x34);
 		/* Console output disabled while early tty bring-up is unstable. */
             m = fmount(root_dev, NULLINODE, ro);
 		EARLY_TRACE(0x35);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_bootmark('G');
+#endif
             if (m == NULL) {
 			EARLY_TRACE(0x36);
 			EARLY_TRACE(0x3C);
@@ -487,6 +633,9 @@ void fuzix_main(void)
 			mount_tries++;
 			EARLY_TRACE(0x3A);
 			EARLY_TRACE(mount_tries);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			sprinter_bootmark('H');
+#endif
 			if (mount_tries >= 1) {
 				EARLY_TRACE(0x3D);
 				panic(PANIC_NOROOT);
@@ -498,6 +647,9 @@ void fuzix_main(void)
 	    } else
 			EARLY_TRACE(0x37);
         } while(m == NULL);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('C');
+#endif
 
         /* Set the system time from the superblock. In turn user space will
            set it from the user or rtc when prompted. Setting it here
@@ -506,12 +658,22 @@ void fuzix_main(void)
         tod.high = m->m_fs.s_timeh;
 
 	EARLY_TRACE(0x38);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[10] = 0x35;
+	sprinter_dbg[11] = (uint8_t)root_dev;
+	sprinter_dbg[12] = (uint8_t)(root_dev >> 8);
+	sprinter_dbg[13] = ROOTINODE;
+	sprinter_dbg[14] = 0;
+#endif
 	root = i_open(root_dev, ROOTINODE);
 	if (!root) {
 		EARLY_TRACE(0x39);
 		panic(PANIC_NOROOT);
 	}
 	EARLY_TRACE(0x3A);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('D');
+#endif
 
 	kputs("OK\n");
 
@@ -528,5 +690,8 @@ void fuzix_main(void)
 	udata.u_cwd = i_ref(root);
 	udata.u_root = i_ref(root);
 	udata.u_ptab->p_time = ticks.full;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_prepare_init_stdio();
+#endif
 	exec_or_die();
 }

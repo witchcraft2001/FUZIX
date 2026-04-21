@@ -23,17 +23,32 @@ bool rargs(uint8_t **userspace_argv, struct s_argblk * argbuf)
 	argbuf->a_argc = 0;	/* Store argc in argbuf */
 	bufp = argbuf->a_buf;
 
-	while ((ptr = (uint8_t *) ugetp(up)) != NULL) {
-		up += sizeof(uptr_t);
-		++(argbuf->a_argc);	/* Store argc in argbuf. */
-		do {
-			*bufp++ = c = ugetc(ptr++);
-			if (bufp > ep) {
-				udata.u_error = E2BIG;
-				return true;	// failed
+	if (udata.u_sysio) {
+		while ((ptr = *(uint8_t **)up) != NULL) {
+			up += sizeof(uptr_t);
+			++(argbuf->a_argc);	/* Store argc in argbuf. */
+			do {
+				*bufp++ = c = *ptr++;
+				if (bufp > ep) {
+					udata.u_error = E2BIG;
+					return true;	// failed
+				}
 			}
+			while (c);
 		}
-		while (c);
+	} else {
+		while ((ptr = (uint8_t *) ugetp(up)) != NULL) {
+			up += sizeof(uptr_t);
+			++(argbuf->a_argc);	/* Store argc in argbuf. */
+			do {
+				*bufp++ = c = ugetc(ptr++);
+				if (bufp > ep) {
+					udata.u_error = E2BIG;
+					return true;	// failed
+				}
+			}
+			while (c);
+		}
 	}
 	argbuf->a_arglen = bufp - (uint8_t *)argbuf->a_buf;	/* Store total string size. */
 	argbuf->a_arglen = (size_t)ALIGNUP(argbuf->a_arglen);

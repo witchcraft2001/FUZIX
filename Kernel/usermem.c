@@ -8,6 +8,13 @@
 #include <kdata.h>
 #include <printf.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t spr_va_stage;
+extern uint16_t spr_va_base;
+extern uint16_t spr_va_size;
+extern uint16_t spr_va_top;
+#endif
+
 #if !defined(CONFIG_LEVEL_0)
 
 /* Flat mode has to use its own valaddr: tidy this */
@@ -16,16 +23,44 @@
 /* This checks to see if a user-supplied address is legitimate */
 usize_t valaddr(const uint8_t *base, usize_t size, uint_fast8_t is_write)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	(void)is_write;
+	spr_va_stage = 1;
+	spr_va_base = (uint16_t)(uarg_t)base;
+	spr_va_size = (uint16_t)size;
+	spr_va_top = (uint16_t)udata.u_top;
+#endif
 	/* Cast to deal with gcc6809 fun */
-	if ((usize_t)base + size < (usize_t)base)
+	if ((usize_t)base + size < (usize_t)base) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_va_stage = 2;
+#endif
 		size = MAXUSIZE - (usize_t)base + 1;
+	}
 	if (!base || base < (const uint8_t *)PROGBASE ||
-		base > (const uint8_t *)(size_t)udata.u_top)
+		base > (const uint8_t *)(size_t)udata.u_top) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_va_stage = 3;
+#endif
 		size = 0;
-	else if (base + size > (const uint8_t *)(size_t)udata.u_top)
+	}
+	else if (base + size > (const uint8_t *)(size_t)udata.u_top) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_va_stage = 4;
+#endif
 		size = (uint8_t *)(size_t)udata.u_top - base;
-	if (size == 0)
+	}
+	if (size == 0) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_va_stage = 5;
+#endif
 		udata.u_error = EFAULT;
+	}
+	else {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		spr_va_stage = 6;
+#endif
+	}
 	return size;
 }
 

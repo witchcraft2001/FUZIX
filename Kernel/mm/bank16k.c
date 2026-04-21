@@ -44,6 +44,13 @@
 static unsigned char pfree[MAX_MAPS];
 static unsigned char pfptr = 0;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+void pagemap_reset_pool(void)
+{
+	pfptr = 0;
+}
+#endif
+
 /*
  *	Helper for platform to add pages at boot
  */

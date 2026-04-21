@@ -485,6 +485,17 @@ uint16_t t;
 
 arg_t _pause(void)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Sprinter bring-up: pause(0) in PID 1 currently enters a broken
+	 * sleep/switchout path and resumes into garbage kernel/user state.
+	 * Let the diagnostic init continue past this checkpoint so the
+	 * rest of userspace/runtime can be validated while the scheduler
+	 * path is debugged separately.
+	 */
+	if (!t && udata.u_ptab->p_pid == 1)
+		return 0;
+#endif
 	/* Make sure we don't set a timeout, have it expire then sleep */
 	irqflags_t irq = di();
 	/* 0 is a traditional "pause", n is a timeout for doing

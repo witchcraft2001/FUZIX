@@ -28,6 +28,14 @@ MAP_BANK1	.equ	0x4A49
 	.globl map_kernel_restore
 	.globl _get_common
 	.globl _swap_finish
+	.globl _spr_dofork_count
+	.globl _spr_dofork_ret
+	.globl _spr_dofork_child
+	.globl _spr_dofork_upages
+	.globl _spr_dofork_cpages
+	.globl _spr_dofork_iter
+	.globl _spr_dofork_child_page
+	.globl _spr_dofork_parent_page
 
         ; imported debug symbols
         .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
@@ -232,6 +240,28 @@ _dofork:
 	push bc
 
         ld (fork_proc_ptr), hl
+	push hl
+	push de
+	ld hl, #_spr_dofork_count
+	inc (hl)
+	ld hl, #_spr_dofork_ret
+	pop de
+	ld (hl), e
+	inc hl
+	ld (hl), d
+	pop hl
+	ld (_spr_dofork_child), hl
+	push hl
+	ld de, #P_TAB__P_PAGE_OFFSET
+	add hl, de
+	ld de, #_spr_dofork_cpages
+	ld bc, #4
+	ldir
+	ld hl, #_udata + U_DATA__U_PAGE
+	ld de, #_spr_dofork_upages
+	ld bc, #4
+	ldir
+	ld hl, (_spr_dofork_child)
 
         ; prepare return value in parent process -- HL = p->p_pid;
         ld de, #P_TAB__P_PID_OFFSET
@@ -300,6 +330,8 @@ fork_copy:
 	ld de, #_udata + U_DATA__U_PAGE
 	; and de is the parent
 fork_next:
+	ld a, b
+	ld (_spr_dofork_iter), a
 	ld a, (hl)
 	cp #0x08
 	jr c, fork_next_child_bad
@@ -308,6 +340,7 @@ fork_next:
 fork_next_child_bad:
 	ld a, #0x49
 fork_next_child_ok:
+	ld (_spr_dofork_child_page), a
 	out (MPGSEL_1), a	; 0x4000 map the child
 	ld c, a
 	inc hl
@@ -319,6 +352,7 @@ fork_next_child_ok:
 fork_next_parent_bad:
 	ld a, #0x4A
 fork_next_parent_ok:
+	ld (_spr_dofork_parent_page), a
 	out (MPGSEL_2), a	; 0x8000 maps the parent
 	inc de
 	exx
