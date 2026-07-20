@@ -487,11 +487,11 @@ arg_t _pause(void)
 {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	/*
-	 * Sprinter bring-up: pause(0) in PID 1 currently enters a broken
-	 * sleep/switchout path and resumes into garbage kernel/user state.
-	 * Let the diagnostic init continue past this checkpoint so the
-	 * rest of userspace/runtime can be validated while the scheduler
-	 * path is debugged separately.
+	 * Sprinter: real psleep/switchout for PID1 still ends in
+	 * plt_monitor (PC=F251).  Keep pause(0) as a fast no-op for
+	 * PID1 so /init can idle in a user-space loop while the
+	 * scheduler path is fixed.  Non-zero timeouts and other PIDs
+	 * still take the real sleep path.
 	 */
 	if (!t && udata.u_ptab->p_pid == 1)
 		return 0;

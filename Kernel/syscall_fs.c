@@ -22,6 +22,7 @@ extern uint8_t spr_gifr;
 extern uint8_t spr_gifa;
 extern uint16_t spr_giin;
 extern uint16_t spr_gis;
+extern void spr_map_win0_k(void);
 #endif
 #include <userstructs.h>
 
@@ -463,6 +464,10 @@ static arg_t readwrite(uint_fast8_t reading)
 	spr_rdwr_argn = (uint16_t)udata.u_argn;
 	spr_rdwr_argn1 = (uint16_t)udata.u_argn1;
 	spr_rdwr_argn2 = (uint16_t)udata.u_argn2;
+	/* Unique latch: proves readwrite() ran (discard does not touch [0]). */
+	sprinter_dbg[0] = 0xB1;
+	sprinter_dbg[1] = reading;
+	sprinter_dbg[2] = (uint8_t)d;
 #endif
 	if (!nbytes)
 		return 0;
@@ -491,10 +496,25 @@ static arg_t readwrite(uint_fast8_t reading)
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_rdwr_stage = 5;
+	sprinter_dbg[0] = 0xB5;
 #endif
 	(reading ? readi : writei)(ino, flag);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern void spr_map_win0_k(void);
+		spr_map_win0_k();
+	}
+#endif
 	updoff();
 	i_unlock(ino);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/* After updoff: stale EEXIST must not poison the carry flag. */
+	if (!reading) {
+		sprinter_dbg[11] = (uint8_t)udata.u_error;
+		udata.u_error = 0;
+		sprinter_dbg[12] = 0;
+	}
+#endif
 
 	return udata.u_done;
 }

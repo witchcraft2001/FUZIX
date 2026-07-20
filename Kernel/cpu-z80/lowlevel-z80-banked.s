@@ -24,7 +24,7 @@
 
 	; platform provided functions
 	.globl map_kernel
-	.globl map_proc_always
+        .globl map_proc_always
 	.globl map_kernel_di
 	.globl map_proc_always_di
         .globl map_save_kernel
@@ -82,6 +82,7 @@
 	.globl _spr_sys_fixup
 	.globl _spr_sysarg_sp
 	.globl _sprinter_last_exec_ptab
+	.globl _spr_rw_stage
 	.globl _ptab
 	.globl mpgsel_cache
         .globl _unix_syscall
@@ -171,13 +172,47 @@ unix_syscall_entry:
 	add hl, sp
 	ld (_spr_sysarg_sp), hl
 
-	ld a, c
 	xor a
 	ld (_spr_sys_enter_fixup), a
-	; Sprinter bring-up: PID1 can reach its first syscall with
-	; udata.u_ptab already zeroed. Recover it from ptab[0] so
-	; we can observe the next real failure instead of falling
-	; straight into fallback user pages.
+	ld a, c
+        ; save system call number
+        ld (_udata + U_DATA__U_CALLNO), a
+	ld (_spr_sys_enter_no), a
+        ; locate function call arguments on the userspace stack
+        ; after the register saves the original entry SP is at SP+12,
+        ; and syscall args begin four bytes above that.
+	; User stack lives in common (WIN3), so this is safe before map_kernel.
+        ld hl, #16
+        add hl, sp
+        ; advance to syscall arguments
+        ; copy arguments to common memory
+        ld de, #_udata + U_DATA__U_ARGN
+
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+
+	ld a, #1
+	ld (_udata + U_DATA__U_INSYS), a
+
+        ; save process stack pointer
+        ld (_udata + U_DATA__U_SYSCALL_SP), sp
+        ; switch to kernel stack
+        ld sp, #kstack_top
+
+        ; map in kernel keeping common — MUST run before any access to
+        ; ptab / kernel WIN0.  With user WIN0 mapped, reading _ptab at
+        ; ~0x106F would hit the process page and syscall_fix_pages would
+        ; corrupt user RAM instead of the real ptab.
+	call map_kernel_di
+
+	; Sprinter bring-up: repair u_ptab / p_page only after kernel WIN0
+	; is mapped so the loads/stores hit real kernel data.
 	ld de, (_udata + U_DATA__U_PTAB)
 	ld a, d
 	or e
@@ -224,6 +259,25 @@ syscall_fix_pages:
 	ld (_spr_sys_enter_fixup), a
 	ld hl, #P_TAB__P_PAGE_OFFSET
 	add hl, de
+	; Prefer udata.u_page (captured while user-mapped) over the live
+	; mpgsel_cache, which is already the kernel map after map_kernel_di.
+	ld a, (_udata + U_DATA__U_PAGE)
+	cp #0x08
+	jr c, syscall_fix_from_cache
+	cp #0x50
+	jr nc, syscall_fix_from_cache
+	ld (hl), a
+	inc hl
+	ld a, (_udata + U_DATA__U_PAGE + 1)
+	ld (hl), a
+	inc hl
+	ld a, (_udata + U_DATA__U_PAGE + 2)
+	ld (hl), a
+	inc hl
+	ld a, (_udata + U_DATA__U_PAGE + 3)
+	ld (hl), a
+	jr syscall_pages_ok
+syscall_fix_from_cache:
 	ld a, (mpgsel_cache)
 	ld (hl), a
 	ld (_udata + U_DATA__U_PAGE), a
@@ -240,10 +294,6 @@ syscall_fix_pages:
 	ld (hl), a
 	ld (_udata + U_DATA__U_PAGE + 3), a
 syscall_pages_ok:
-	ld a, c
-        ; save system call number
-        ld (_udata + U_DATA__U_CALLNO), a
-	ld (_spr_sys_enter_no), a
 	ld a, (_udata + U_DATA__U_PAGE)
 	ld (_spr_sys_enter_up0), a
 	ld a, (_udata + U_DATA__U_PAGE + 1)
@@ -258,34 +308,6 @@ syscall_pages_ok:
 	ld (_spr_sys_enter_pp1), a
 	ld a, (mpgsel_cache + 2)
 	ld (_spr_sys_enter_pp2), a
-        ; locate function call arguments on the userspace stack
-        ; after the register saves the original entry SP is at SP+12,
-        ; and syscall args begin four bytes above that.
-        ld hl, #16
-        add hl, sp
-        ; advance to syscall arguments
-        ; copy arguments to common memory
-        ld de, #_udata + U_DATA__U_ARGN
-
-	ldi
-	ldi
-	ldi
-	ldi
-	ldi
-	ldi
-	ldi
-	ldi
-
-	ld a, #1
-	ld (_udata + U_DATA__U_INSYS), a
-
-        ; save process stack pointer
-        ld (_udata + U_DATA__U_SYSCALL_SP), sp
-        ; switch to kernel stack
-        ld sp, #kstack_top
-
-        ; map in kernel keeping common
-	call map_kernel_di
 
         ; re-enable interrupts
         ei
@@ -418,6 +440,27 @@ spr_upage_ok:
 	; Back to the user stack
 	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 
+	;
+	; Sprinter bring-up: write() can leave a stale EEXIST in u_error
+	; even after the tty path printed and cleared it (dbg8=0, stage C2).
+	; Only force-clear when the early-trace tty write path completed
+	; (spr_rw_stage == 0xC2); do not mask real partial-write errors.
+	; Also reload u_retval from u_done — the banked dispatch stub has
+	; been observed returning HL=0 after a successful writei/cdwrite.
+	;
+	ld a, (_udata + U_DATA__U_CALLNO)
+	cp #8			; write
+	jr nz, spr_err_keep
+	ld a, (_spr_rw_stage)
+	cp #0xC2
+	jr nz, spr_err_keep
+	ld hl, #0
+	ld (_udata + U_DATA__U_ERROR), hl
+	ld (_spr_sys_exit_err), hl
+	ld hl, (_udata + 0x9F)	; u_done (SDCC layout; not in kernel.def)
+	ld (_udata + U_DATA__U_RETVAL), hl
+spr_err_keep:
+
 	ld hl, (_udata + U_DATA__U_ERROR)
 	ld de, (_udata + U_DATA__U_RETVAL)
 
@@ -500,7 +543,9 @@ _doexec:
         call map_proc_always
 
         pop bc ; return address
-        pop af ; sdcc banked/noopt saves AF before the call
+        ; SDCC banked ABI leaves a noopt AF word between return address
+        ; and first argument at this call site.
+        pop af ; discard noopt AF word
         pop de ; start address
 
         ld hl, (_udata + U_DATA__U_ISP)

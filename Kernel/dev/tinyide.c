@@ -1,6 +1,7 @@
 #include <kernel.h>
 #include <kdata.h>
 #include <printf.h>
+#include <tinydisk.h>
 #include <tinyide.h>
 #include "plt_ide.h"
 
@@ -8,6 +9,19 @@
 extern void plt_trace(uint8_t code);
 #define IDE_TRACE(x) plt_trace(x)
 extern void sprinter_bootmark(char c);
+extern uint8_t spr_rw_stage;
+extern uint8_t spr_rw_fd;
+extern uint16_t spr_rw_base;
+
+static void sprinter_boothex(uint8_t v)
+{
+	uint8_t n;
+
+	n = v >> 4;
+	sprinter_bootmark(n < 10 ? '0' + n : 'A' + (n - 10));
+	n = v & 0x0F;
+	sprinter_bootmark(n < 10 ? '0' + n : 'A' + (n - 10));
+}
 #else
 #define IDE_TRACE(x) do { } while (0)
 #endif
@@ -57,26 +71,20 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
 #endif
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    /* Sprinter bring-up: previously tried to switch the drive into
+     * 8-bit PIO mode here (Set Features 0xEF, subcode 0x01).  On the
+     * MAME IDE emulation that actually took effect, leaving the drive
+     * packing one disk byte in the low 8 bits of each 16-bit word
+     * with 0x00 in the high 8 bits.  The Sprinter DCP bridge then
+     * exposed each word as two 8-bit reads at port 0x0050 so the
+     * 512-INI sector transfer came back as 256 disk bytes interleaved
+     * with 256 zeros — symptom: `fmount()` saw `s_mounted=0x00C6`
+     * instead of `0x31C6`, `s_isize=0x0031` instead of `0x0100`.
+     * BIOS `HDRIVER6.ASM:RDS003` never enables 8-bit PIO and relies
+     * on the default 16-bit data port for `INI`, so we do the same.
+     * Keep only the !BUSY wait as a ready check. */
     IDE_TRACE(0x94);
-    if (!ide_wait_mask(0x80, 0x00)) {
-      ide_write(error, 0x01);
-      ide_write(cmd, 0xEF);
-      if (!ide_wait_mask(0x80, 0x00)) {
-        uint8_t st = ide_read(status);
-        IDE_TRACE(0x96);
-        IDE_TRACE(st);
-        if (!(st & 0x01)) {
-          ide_8bit_mode = 1;
-          IDE_TRACE(0x95);
-        } else {
-          IDE_TRACE(0x97);
-          IDE_TRACE(ide_read(error));
-        }
-      } else {
-        IDE_TRACE(0x98);
-        IDE_TRACE(ide_wait_last_status);
-      }
-    } else {
+    if (ide_wait_mask(0x80, 0x00)) {
       IDE_TRACE(0x99);
       IDE_TRACE(ide_wait_last_status);
     }
@@ -130,6 +138,12 @@ int ide_xfer(uint_fast8_t dev, bool is_read, uint32_t lba, uint8_t *dptr)
     }
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
     sprinter_bootmark('Y');
+    sprinter_bootmark((char)('0' + td_raw));
+    sprinter_boothex(((uint16_t)(uarg_t)dptr) >> 8);
+    sprinter_boothex((uint16_t)(uarg_t)dptr);
+    spr_rw_stage = 0xDA;
+    spr_rw_fd = td_raw;
+    spr_rw_base = (uint16_t)(uarg_t)dptr;
 #endif
     if (is_read)
       devide_read_data(dptr);

@@ -7,6 +7,8 @@
 extern void plt_trace(uint8_t code);
 #define FM_TRACE(x) plt_trace(x)
 extern void sprinter_bootmark(char c);
+extern void sprinter_boothex(uint8_t v);
+extern uint8_t sprinter_dbg[];
 extern uint16_t sprinter_last_ideref_in;
 extern uint16_t sprinter_last_ideref_post;
 extern uint16_t sprinter_last_ideref_wr;
@@ -28,7 +30,15 @@ extern uint16_t sprinter_bad_iopen_ino;
 extern uint8_t sprinter_bad_iopen_bad;
 extern uint16_t sprinter_bad_iopen_mode;
 extern uint16_t sprinter_bad_iopen_nlink;
-extern uint8_t sprinter_dbg[];
+extern uint16_t sprinter_bad_iopen_ptr;
+extern uint16_t sprinter_bad_iopen_a0;
+extern uint16_t sprinter_bad_iopen_a1;
+extern uint16_t sprinter_bad_iopen_flags;
+extern uint8_t sprinter_last_nopen_stage;
+extern uint16_t sprinter_last_nopen_wd;
+extern uint16_t sprinter_last_nopen_ninode;
+extern uint8_t sprinter_last_nopen_name0;
+extern uint8_t sprinter_last_nopen_char;
 extern uint8_t sprinter_chlink_stage;
 extern uint16_t sprinter_chlink_wd;
 extern uint16_t sprinter_chlink_nindex;
@@ -49,6 +59,9 @@ extern uint16_t spr_iac_tinode;
 extern uint16_t spr_iac_isize;
 extern uint8_t spr_iac_ninode;
 extern uint8_t spr_iac_mounted;
+extern uint16_t spr_gd_dev;
+extern uint16_t spr_gd_mnt;
+extern uint16_t spr_gd_state;
 
 #define SPRINTER_TRACE_INODE_DEV 0x0001
 #define SPRINTER_TRACE_INODE_NUM 0x0032
@@ -113,11 +126,41 @@ void sprinter_wr_inode(inoptr ino, uint8_t site)
  * calls as they want a parent and to create the new node.
  */
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+/* lastname lives in platform COMMONMEM (sprinter.s) — WIN0 DATA is unsafe. */
+#else
 uint8_t lastname[31];
+#endif
 
 static uint_fast8_t n_open_fault;
 static uint_fast8_t n_fault_type;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+/* Prefer common-resident walk pointers: WIN0 DATA vanishes under user map. */
+extern uint8_t *spr_nopen_name;
+extern uint8_t *spr_nopen_nameend;
+#define name spr_nopen_name
+#define nameend spr_nopen_nameend
+#else
 static uint8_t *name, *nameend;
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+static bool sprinter_inode_ptr_valid(inoptr ino)
+{
+	return (uarg_t)ino >= (uarg_t)i_tab &&
+		(uarg_t)ino < (uarg_t)(i_tab + ITABSIZE);
+}
+
+static void sprinter_nopen_snap(uint8_t stage, inoptr wd, inoptr ninode,
+	uint8_t c)
+{
+	sprinter_last_nopen_stage = stage;
+	sprinter_last_nopen_wd = (uint16_t)(uarg_t)wd;
+	sprinter_last_nopen_ninode = (uint16_t)(uarg_t)ninode;
+	sprinter_last_nopen_name0 = lastname[0];
+	sprinter_last_nopen_char = c;
+}
+#endif
 
 static uint8_t getcf(void)
 {
@@ -126,13 +169,30 @@ static uint8_t getcf(void)
         n_open_fault = 1;
         return 0;
     }
+    /* n_open() is also used for kernel-resident paths under u_sysio
+       (/init, early stdio bootstrap). Those bytes live in kernel/common
+       space and must not be fetched through __ugetc(), which forcibly
+       remaps process memory. */
+    if (udata.u_sysio)
+        return *name;
     return (uint8_t)_ugetc(name);
 }
 
 inoptr n_open(uint8_t *namep, inoptr *parent)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    /*
+     * Sprinter: do NOT keep walk state in WIN0 DATA (staticfast).  bread()
+     * / IDE / map_proc can leave WIN0 on a non-kernel page; the next
+     * read of wd/ninode then returns garbage and i_deref panics.
+     * Stack lives in common (WIN3), so auto locals stay valid.
+     */
+    inoptr wd;
+    inoptr ninode;
+#else
     staticfast inoptr wd;     /* the directory we are currently searching. */
     staticfast inoptr ninode;
+#endif
     regptr uint8_t *fp;
     regptr inoptr temp;
     uint8_t c;
@@ -140,6 +200,23 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
 
     if (parent)
         *parent = NULLINODE;
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	spr_map_win0_k();
+    }
+    /*
+     * After /bin/sh entry, directory walks still end in switchout →
+     * plt_monitor.  Fail PID1 userland n_open immediately with ENOENT
+     * so the shell can skip .profile / path probes and reach a prompt.
+     * Kernel u_sysio and execve synthetic opens are unaffected.
+     */
+    if (udata.u_ptab && udata.u_ptab->p_pid == 1 && !udata.u_sysio) {
+	udata.u_error = ENOENT;
+	return NULLINODE;
+    }
+#endif
 
     /*
      * Sprinter early bring-up can hand _execve() a kernel-resident
@@ -173,13 +250,44 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
             n_fault_type = EACCES;
     }
 
-    if(getcf() == '/')
+    c = getcf();
+    if(c == '/')
         wd = udata.u_root;
     else
         wd = udata.u_cwd;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    /*
+     * Sprinter bring-up: we still see occasional pre-exec corruption where
+     * u_root/u_cwd turns into a tiny non-inode value (eg 0x0001) before the
+     * first n_open("/init"). Recover from that transient state by reopening
+     * ROOTINODE and continue from a validated in-core pointer.
+     */
+    if (!sprinter_inode_ptr_valid(wd)) {
+        inoptr fix = root;
+
+        if (!sprinter_inode_ptr_valid(fix))
+            fix = i_open(root_dev, ROOTINODE);
+
+        sprinter_nopen_snap(0xCF, wd, fix, c);
+        if (!sprinter_inode_ptr_valid(fix))
+            return NULLINODE;
+        if (c == '/')
+            udata.u_root = fix;
+        else
+            udata.u_cwd = fix;
+        wd = fix;
+    }
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_nopen_snap(0xD0, wd, wd, 0);
+#endif
     ninode = i_ref(wd);
     i_ref(ninode);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_nopen_snap(0xD1, wd, ninode, 0);
+#endif
 
     for(;;)
     {
@@ -199,11 +307,17 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
               this up ? */
         if(ninode)
             ninode = srch_mt(ninode);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_nopen_snap(0xD2, wd, ninode, 0);
+#endif
 
         /* Skip any slashes between nodes. The standards say there can be
            multiple slashes */
         while((c = getcf()) == '/')
             ++name;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_nopen_snap(0xD3, wd, ninode, c);
+#endif
         /* It is acceptable to end a file path with / */
         if(!c || n_open_fault)           /* No more components of path? */
             break;
@@ -269,13 +383,32 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
         }
         /* Find the entry in the directory. ninode will be NULL if we failed or
            valid and referenced if it existed */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_nopen_snap(0xD5, wd, ninode, lastname[0]);
+	{
+		extern void spr_map_win0_k(void);
+		spr_map_win0_k();
+	}
+#endif
         ninode = srch_dir(wd, lastname);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        sprinter_nopen_snap(0xD6, wd, ninode, lastname[0]);
+#endif
     }
     /* If we faulted then treat it as invalid */
     if (n_open_fault) {
         udata.u_error = n_fault_type;
         goto nodir;
     }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	/* Parent/target inodes live in WIN0 DATA. */
+	spr_map_win0_k();
+	sprinter_nopen_snap(0xD7, wd, ninode, 0);
+    }
+#endif
 
     /* Return the parent node if requested. This is needed by callers that
        do directory manipulation */
@@ -314,6 +447,14 @@ inoptr srch_dir(register inoptr wd, uint8_t *compname)
     int nblocks;
     uint16_t inum;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	/* wd->c_node / i_tab live in WIN0 DATA. */
+	spr_map_win0_k();
+    }
+#endif
+
     i_lock(wd);
 
     nblocks = inode_blocks(wd);
@@ -322,6 +463,12 @@ inoptr srch_dir(register inoptr wd, uint8_t *compname)
         buf = bread(wd->c_dev, bmap(wd, curblock, 1), 0);
         if (buf == NULL)
             break;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern void spr_map_win0_k(void);
+		spr_map_win0_k();
+	}
+#endif
         for(curentry = 0; curentry < (BLKSIZE / DIR_LEN); ++curentry) {
             d = blkptr(buf, curentry * DIR_LEN, DIR_LEN);
             if(namecomp(compname, d->d_name)) {
@@ -391,6 +538,10 @@ inoptr i_open(register uint16_t dev, uint16_t ino)
     bool isnew = false;
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	spr_map_win0_k();
+    }
     sprinter_dbg[10] = 0x33;
     sprinter_dbg[11] = (uint8_t)dev;
     sprinter_dbg[12] = (uint8_t)(dev >> 8);
@@ -441,8 +592,22 @@ inoptr i_open(register uint16_t dev, uint16_t ino)
         return(NULLINODE);
     }
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	spr_map_win0_k();
+    }
+#endif
     if (breadi(dev, ino, &nindex->c_node))
         return NULLINODE;
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	/* breadi may have left WIN0 on a buffer/user page. */
+	spr_map_win0_k();
+    }
+#endif
 
     nindex->c_dev = dev;
     nindex->c_num = ino;
@@ -464,17 +629,26 @@ found:
     return nindex;
 
 badino:
-    kputs("i_open: bad disk inode\n");
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+    /*
+     * Do not kputs/kprintf here during bring-up: a badino hit right after
+     * the first user write() nested another kputchar path while banks were
+     * wrong, then RST38@00C4.  Latch only.
+     */
     sprinter_last_iopen_bad = isnew ? 2 : 1;
     sprinter_last_iopen_mode = nindex->c_node.i_mode;
     sprinter_last_iopen_nlink = nindex->c_node.i_nlink;
+    sprinter_bad_iopen_ptr = (uint16_t)(uarg_t)nindex;
     sprinter_bad_iopen_dev = dev;
     sprinter_bad_iopen_ino = ino;
-    sprinter_bad_iopen_bad = sprinter_last_iopen_bad;
-    sprinter_bad_iopen_mode = sprinter_last_iopen_mode;
-    sprinter_bad_iopen_nlink = sprinter_last_iopen_nlink;
-    sprinter_last_iopen_ret = 0;
+    sprinter_bad_iopen_a0 = nindex->c_node.i_addr[0];
+    sprinter_bad_iopen_a1 = nindex->c_node.i_addr[1];
+    sprinter_dbg[28] = 0xBD;
+    sprinter_dbg[29] = (uint8_t)dev;
+    sprinter_dbg[30] = (uint8_t)ino;
+    sprinter_dbg[31] = (uint8_t)(ino >> 8);
+#else
+    kputs("i_open: bad disk inode\n");
 #endif
     return NULLINODE;
 }
@@ -748,6 +922,12 @@ fsptr getdev(uint16_t dev)
     mnt = fs_tab_get(dev);
 
     if (!mnt || mnt->m_fs.s_mounted == 0) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+        spr_gd_dev = dev;
+        spr_gd_mnt = (uint16_t)(uarg_t)mnt;
+        spr_gd_state = (uint16_t)udata.u_callno |
+            ((uint16_t)udata.u_insys << 8);
+#endif
         panic(PANIC_GD_BAD);
         /* Return needed to persuade SDCC all is ok */
         return NULL;
@@ -1085,6 +1265,25 @@ void i_deref(register inoptr ino)
 #endif
         return;
     }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	/*
+	 * Observed: i_deref((inoptr)1) and other non-i_tab pointers during
+	 * PID1 n_open → corrupt inode.  Reject anything outside i_tab so a
+	 * stale WIN0 walk pointer cannot hard-stop bring-up.
+	 */
+	spr_map_win0_k();
+	if (!sprinter_inode_ptr_valid(ino)) {
+		sprinter_ideref_null_count++;
+		sprinter_ideref_null_sys = (uint16_t)udata.u_callno |
+			((uint16_t)udata.u_insys << 8);
+		sprinter_last_ideref_in = (uint16_t)(uarg_t)ino;
+		return;
+	}
+    }
+#endif
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
     sprinter_last_ideref_in = (uint16_t)(uarg_t)ino;
@@ -1515,12 +1714,22 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     register bufptr buf;
 
     FM_TRACE(0x50);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[15] = 0xF3;
+    sprinter_dbg[16] = (uint8_t)dev;
+    sprinter_dbg[17] = (uint8_t)(dev >> 8);
+    sprinter_dbg[18] = (uint8_t)flags;
+#endif
 
     if(d_open(dev, 0) != 0) {
         FM_TRACE(0x51);
         FM_TRACE((uint8_t)udata.u_error);
         FM_TRACE(0x57);
     }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[15] = 0xF4;
+    sprinter_dbg[16] = (uint8_t)udata.u_error;
+#endif
     FM_TRACE(0x52);
     udata.u_error = 0;
 
@@ -1531,6 +1740,11 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
 
     m = newfstab();
     FM_TRACE(0x5B);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[15] = 0xF5;
+    sprinter_dbg[16] = (uint8_t)(uarg_t)m;
+    sprinter_dbg[17] = (uint8_t)(((uarg_t)m) >> 8);
+#endif
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
     sprinter_bootmark('J');
 #endif
@@ -1546,6 +1760,12 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     FM_TRACE(0x5C);
     buf = bread(dev, 1, 0);
     FM_TRACE(0x5D);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    sprinter_dbg[15] = 0xF6;
+    sprinter_dbg[16] = (uint8_t)(uarg_t)buf;
+    sprinter_dbg[17] = (uint8_t)(((uarg_t)buf) >> 8);
+    sprinter_dbg[18] = (uint8_t)udata.u_error;
+#endif
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
     sprinter_bootmark('K');
 #endif
@@ -1593,6 +1813,22 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
     fp->s_mounted, fp->s_isize, fp->s_fsize);
 #endif
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    /* Show the magic and the sanity window on screen so we can see
+     * exactly why the validation below may fail on Sprinter. On a good
+     * 512-byte superblock we expect: mnt=31C6 isz=0100 fsz=FFFF shift=00 */
+    sprinter_bootmark('m');
+    sprinter_boothex((uint8_t)(fp->s_mounted >> 8));
+    sprinter_boothex((uint8_t)fp->s_mounted);
+    sprinter_bootmark('i');
+    sprinter_boothex((uint8_t)(fp->s_isize >> 8));
+    sprinter_boothex((uint8_t)fp->s_isize);
+    sprinter_bootmark('f');
+    sprinter_boothex((uint8_t)(fp->s_fsize >> 8));
+    sprinter_boothex((uint8_t)fp->s_fsize);
+    sprinter_bootmark('s');
+    sprinter_boothex(fp->s_shift);
+#endif
     /* See if there really is a filesystem on the device */
     if(fp->s_mounted != SMOUNTED  ||  fp->s_isize >= fp->s_fsize ||
         fp->s_shift > FS_MAX_SHIFT) {
@@ -1634,20 +1870,37 @@ struct mount *fmount(uint16_t dev, register inoptr ino, uint16_t flags)
 
 void magic(inoptr ino)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+    {
+	extern void spr_map_win0_k(void);
+	spr_map_win0_k();
+    }
+#endif
     if(ino->c_magic != CMAGIC) {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
         uint_fast8_t slot = 0xFF;
         uint16_t pid = 0;
 
-        if (ino >= i_tab && ino < i_tab + ITABSIZE)
+        if (sprinter_inode_ptr_valid(ino))
             slot = (uint_fast8_t)(ino - i_tab);
         if (udata.u_ptab)
             pid = udata.u_ptab->p_pid;
         kprintf("magic0 ptr=%x slot=%x site=%x mg=%x dev=%x num=%x refs=%x fl=%x pid=%x sys=%x in=%x\n",
-            ino, slot, sprinter_magic_site,
+            (uint16_t)(uarg_t)ino, slot, sprinter_magic_site,
             ino->c_magic, ino->c_dev, ino->c_num,
             ino->c_refs, ino->c_flags,
             pid, udata.u_callno, udata.u_insys);
+        kprintf("nopen st=%x wd=%x ni=%x n0=%x ch=%x iodev=%x ino=%x ret=%x bad=%x md=%x nl=%x\n",
+            sprinter_last_nopen_stage, sprinter_last_nopen_wd,
+            sprinter_last_nopen_ninode, sprinter_last_nopen_name0,
+            sprinter_last_nopen_char, sprinter_last_iopen_dev,
+            sprinter_last_iopen_ino, sprinter_last_iopen_ret,
+            sprinter_last_iopen_bad, sprinter_last_iopen_mode,
+            sprinter_last_iopen_nlink);
+        kprintf("magic0 roots ur=%x uc=%x gr=%x\n",
+            (uint16_t)(uarg_t)udata.u_root,
+            (uint16_t)(uarg_t)udata.u_cwd,
+            (uint16_t)(uarg_t)root);
         kprintf("magic0 raw=%x %x %x %x\n",
             ((uint8_t *)ino)[0], ((uint8_t *)ino)[1],
             ((uint8_t *)ino)[2], ((uint8_t *)ino)[3]);

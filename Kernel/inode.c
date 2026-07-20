@@ -12,6 +12,7 @@ extern uint16_t spr_rw_count;
 extern uint8_t spr_rw_access;
 extern uint16_t spr_rw_mode;
 extern uint16_t spr_rw_dev;
+extern uint8_t sprinter_dbg[];
 #endif
 
 #if defined(CONFIG_LARGE_IO_DIRECT)
@@ -197,6 +198,47 @@ void writei(regptr inoptr ino, uint_fast8_t flag)
 	dev = ino->c_dev;
 	udata.u_done = 0;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * First user write(1,...) was hitting writei()'s default ENODEV
+	 * despite a live F_CDEV tty inode in of_tab.  Bypass getmode()
+	 * for tty majors so we can separate "mode classify" from the
+	 * actual cdwrite/tty_write path.  Early-trace only.
+	 *
+	 * Use dbg[3..] — dbg[24..] is claimed by map_init's pp[] snapshot.
+	 * Never call full map_kernel() from banked writei (clobbers WIN1/2).
+	 */
+	{
+		extern uint8_t mpgsel_cache[];
+		extern void spr_map_win0_k(void);
+		uint16_t da;
+
+		sprinter_dbg[0] = 0xB8;
+		spr_map_win0_k();
+		sprinter_dbg[3] = mpgsel_cache[0];
+		sprinter_dbg[4] = mpgsel_cache[1];
+		da = ino->c_node.i_addr[0];
+		sprinter_dbg[5] = (uint8_t)da;
+		sprinter_dbg[6] = (uint8_t)(da >> 8);
+		sprinter_dbg[7] = (uint8_t)(ino->c_node.i_mode >> 8);
+
+		if (major(da) == 2 || isdevice(ino)) {
+			spr_rw_stage = 0xC0;
+			spr_rw_base = da;
+			spr_rw_mode = ino->c_node.i_mode;
+			udata.u_done = cdwrite(da, flag);
+			spr_map_win0_k();
+			udata.u_error = 0;
+			spr_rw_stage = 0xC2;
+			sprinter_dbg[0] = 0xBC;
+			sprinter_dbg[8] = (uint8_t)udata.u_error;
+			sprinter_dbg[9] = (uint8_t)udata.u_done;
+			return;
+		}
+		sprinter_dbg[0] = 0xBE;
+	}
+#endif
+
 	switch (getmode(ino)) {
 
 	case MODE_R(F_BDEV):
@@ -285,10 +327,25 @@ void writei(regptr inoptr ino, uint_fast8_t flag)
 #endif
 		break;
 	default:
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		/*
+		 * Observed: getmode() sometimes misses F_CDEV for a valid
+		 * synthetic tty inode (mode 0x21B6) during the first user
+		 * write(1,...), returning ENODEV with u_done left at 0.
+		 * Fall through to cdwrite when F_CDEV|F_BDEV is set.
+		 */
+		if (isdevice(ino)) {
+			spr_rw_stage = 0xCF;
+			spr_rw_mode = ino->c_node.i_mode;
+			spr_rw_base = ino->c_node.i_addr[0];
+			udata.u_done = cdwrite(ino->c_node.i_addr[0], flag);
+			spr_rw_stage = 0xCE;
+			break;
+		}
+#endif
 		udata.u_error = ENODEV;
 	}
 }
-
 int16_t doclose(uint_fast8_t uindex)
 {
 	int8_t oftindex;
@@ -338,6 +395,11 @@ inoptr rwsetup(bool is_read, uint_fast8_t * flag)
 	udata.u_base = (unsigned char *) udata.u_argn1;	/* buf */
 	udata.u_count = (susize_t) udata.u_argn2;	/* nbytes */
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern void spr_map_win0_k(void);
+		/* of_tab / i_tab live in WIN0 DATA — force kernel page first. */
+		spr_map_win0_k();
+	}
 	spr_rw_stage = 1;
 	spr_rw_fd = (uint8_t)udata.u_argn;
 	spr_rw_base = (uint16_t)(uarg_t)udata.u_base;
@@ -345,15 +407,24 @@ inoptr rwsetup(bool is_read, uint_fast8_t * flag)
 	spr_rw_access = 0xFF;
 	spr_rw_mode = 0xFFFF;
 	spr_rw_dev = 0xFFFF;
+	sprinter_dbg[0] = 0xB4;
 #endif
 
 	if ((ino = getinode(udata.u_argn)) == NULLINODE) {
 		/* kprintf("[WRS: rwsetup(): getinode(%x) fails]", udata.u_argn); */
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 		spr_rw_stage = 2;
+		sprinter_dbg[0] = 0xB2;
+		sprinter_dbg[3] = (uint8_t)udata.u_error;
+		sprinter_dbg[4] = (uint8_t)udata.u_files[udata.u_argn];
 #endif
 		return (NULLINODE);
 	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[0] = 0xB3;
+	sprinter_dbg[3] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[4] = (uint8_t)(((uarg_t)ino) >> 8);
+#endif
 
 	oftp = of_tab + udata.u_files[udata.u_argn];
 	*flag = oftp->o_access;

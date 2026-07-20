@@ -19,6 +19,7 @@ __sfr __at 0x1C cmos_dat_r;
 
 uint16_t swap_dev = 0xFFFF;
 uint16_t ramtop = PROGTOP;
+struct blkbuf *bufpool_end = bufpool + NBUFS;
 
 void plt_idle(void)
 {
@@ -34,11 +35,9 @@ void plt_idle(void)
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_rw_stage = 0xD6;
 	/*
-	 * Early Sprinter bring-up still sees spurious bytes on the PS/2
-	 * receive path. Feeding them into tty_inproc() produces random
-	 * shell input and eventually bogus i_open()/validchk() panics.
-	 * Keep idle time moving via the software timer, but suppress
-	 * keyboard polling until the SIO/keyboard init is stable.
+	 * Keep idle-time kbd_poll suppressed: spurious PS/2 bytes still
+	 * decode into random shell input and i_open panics.  Interactive
+	 * tty waits for PID1 poll the keyboard from do_psleep() instead.
 	 */
 	spr_rw_stage = 0xD7;
 #else

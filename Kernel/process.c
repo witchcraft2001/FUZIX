@@ -14,10 +14,45 @@
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 extern void plt_trace(uint8_t code);
+extern void sprinter_bootmark(char c);
+extern uint8_t sprinter_exec_fail_stage;
+extern uint16_t sprinter_exec_fail_err;
+extern uint16_t sprinter_exec_fail_name;
+extern uint16_t sprinter_exec_fail_root;
+extern uint16_t sprinter_exec_fail_cwd;
+extern uint16_t sprinter_exec_fail_ino;
+extern uint16_t sprinter_exec_fail_mode;
+extern uint8_t sprinter_exec_fail_perm;
+extern uint8_t sprinter_exec_fail_mflags;
+extern uint16_t sprinter_exec_fail_argv;
+extern uint16_t sprinter_exec_fail_envp;
+extern uint16_t sprinter_exec_fail_done;
+extern uint16_t sprinter_exec_fail_count;
+extern uint8_t sprinter_last_nopen_stage;
+extern uint16_t sprinter_last_nopen_wd;
+extern uint16_t sprinter_last_nopen_ninode;
+extern uint8_t sprinter_last_nopen_name0;
+extern uint8_t sprinter_last_nopen_char;
 extern uint16_t sprinter_last_panic_ptr;
 extern uint8_t sprinter_last_panic_bytes[4];
 extern uint8_t spr_rw_stage;
+extern uint8_t spr_boot_count;
+extern uint8_t spr_doexec_arm;
+extern uint8_t spr_doexec_seen;
+extern uint16_t spr_doexec_expect;
+extern uint16_t spr_doexec_isp;
+extern uint8_t spr_doexec_call_seen;
+extern uint16_t spr_doexec_call_sp;
+extern uint16_t spr_doexec_call_start;
+extern uint8_t spr_common_init_path[];
+extern uint8_t *spr_common_init_argv[];
+extern uint8_t *spr_common_init_envp[];
 #define PROC_TRACE(x) plt_trace(x)
+static bool sprinter_proc_inode_ptr_valid(inoptr ino)
+{
+	return (uarg_t)ino >= (uarg_t)i_tab &&
+		(uarg_t)ino < (uarg_t)(i_tab + ITABSIZE);
+}
 #else
 #define PROC_TRACE(x) do { } while (0)
 #endif
@@ -34,18 +69,69 @@ static void do_psleep(void *event, uint_fast8_t state)
 	di();
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_rw_stage = 0xD0;
+	/*
+	 * PID1 switchout/switchin still ends in plt_monitor / "psleep:
+	 * voodoo".  Busy-poll tty-related waits (read/write on the
+	 * console) and leave disk/buffer sleepers on the real idle path
+	 * so /init load is not starved of completion.
+	 */
+	if (udata.u_ptab->p_pid == 1 &&
+	    (udata.u_callno == 7 /* read */ ||
+	     udata.u_callno == 8 /* write */ ||
+	     (event >= (void *)&ttyinq[0] &&
+	      event < (void *)(&ttyinq[0] + NUM_DEV_TTY + 1)) ||
+	     (event >= (void *)&ttydata[0] &&
+	      event < (void *)(&ttydata[0] + NUM_DEV_TTY + 1)))) {
+		extern void kbd_poll(void);
+
+		udata.u_ptab->p_wait = event;
+		udata.u_ptab->p_waitno = ++waitno;
+		udata.u_ptab->p_status = P_RUNNING;
+		ei();
+		kbd_poll();
+		timer_interrupt();
+		di();
+		udata.u_ptab->p_wait = NULL;
+		udata.u_ptab->p_status = P_RUNNING;
+		ei();
+		return;
+	}
 #endif
 #ifdef DEBUG_SLEEP
 	kprintf("psleep(0x%p)", event);
 #endif
 	switch (udata.u_ptab->p_status) {
-	case P_SLEEP:		// echo output from devtty happens while processes are still sleeping but in-context
+	case P_SLEEP:		/* echo output from devtty happens while processes are still sleeping but in-context */
 	case P_IOWAIT:
-	case P_STOPPED:		// coming to a halt
+	case P_STOPPED:		/* coming to a halt */
 		nready++;	/* We will fix this back up below */
-	case P_RUNNING:		// normal process
+	case P_RUNNING:		/* normal process */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	case P_READY:		/* switchout can leave PID1 READY; treat as runnable */
+#endif
 		break;
 	default:
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		/*
+		 * PID1 can arrive here with a non-canonical status after a
+		 * partial switchout.  Recover with the same busy-poll used
+		 * for tty waits instead of panic("psleep: voodoo").
+		 */
+		if (udata.u_ptab->p_pid == 1) {
+			extern void kbd_poll(void);
+
+			udata.u_ptab->p_wait = event;
+			udata.u_ptab->p_waitno = ++waitno;
+			udata.u_ptab->p_status = P_RUNNING;
+			ei();
+			kbd_poll();
+			timer_interrupt();
+			di();
+			udata.u_ptab->p_wait = NULL;
+			ei();
+			return;
+		}
+#endif
 #ifdef DEBUG_SLEEP
 	        kprintf("psleep(0x%p) -> %d:%d", event, udata.u_ptab->p_pid, udata.u_ptab->p_status);
 #endif
@@ -1233,8 +1319,16 @@ void exec_or_die(void)
 	if (pid != 1)
 		swapper();
 #endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('e');
+#endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	kputs("Starting /init [72]\n");
+#else
 	kputs("Starting /init\n");
+#endif
 	#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('f');
 	/*
 	 * Sprinter bring-up: complete_init() already prepared argv/envp in the
 	 * fresh PID1 address space. Touching user memory again here adds one
@@ -1248,9 +1342,54 @@ void exec_or_die(void)
 	sprinter_last_exec_top = udata.u_top;
 	memcpy(sprinter_last_exec_upage, &udata.u_page, 4);
 	memcpy(sprinter_last_exec_ptab, &udata.u_ptab->p_page, 4);
+	sprinter_bootmark('g');
 	#endif
 	plt_discard();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('h');
+	udata.u_sysio = 1;
+	udata.u_argn = (arg_t)spr_common_init_path;
+	udata.u_argn1 = (arg_t)spr_common_init_argv;
+	udata.u_argn2 = (arg_t)spr_common_init_envp;
+	if (sprinter_proc_inode_ptr_valid(root)) {
+		if (!sprinter_proc_inode_ptr_valid(udata.u_root))
+			udata.u_root = i_ref(root);
+		if (!sprinter_proc_inode_ptr_valid(udata.u_cwd))
+			udata.u_cwd = i_ref(root);
+	}
+	/*
+	 * Do not call sprinter_force_bank1() here: exec_or_die lives in
+	 * CODE2, and remapping WIN1/WIN2 to CODE1 under a live CODE2 PC
+	 * fetches the wrong bank.  _execve() is reached via __bank_2_3.
+	 */
+	sprinter_bootmark('H');
+#endif
 	_execve();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('i');
+	kprintf("xv st=%x er=%x nm=%x rt=%x cw=%x ino=%x md=%x pm=%x mf=%x av=%x ev=%x dn=%x ct=%x\n",
+		sprinter_exec_fail_stage, sprinter_exec_fail_err,
+		sprinter_exec_fail_name, sprinter_exec_fail_root,
+		sprinter_exec_fail_cwd, sprinter_exec_fail_ino,
+		sprinter_exec_fail_mode, sprinter_exec_fail_perm,
+		sprinter_exec_fail_mflags, sprinter_exec_fail_argv,
+		sprinter_exec_fail_envp, sprinter_exec_fail_done,
+		sprinter_exec_fail_count);
+	kprintf("np st=%x wd=%x ni=%x n0=%x ch=%x us=%x ue=%x ur=%x uc=%x\n",
+		sprinter_last_nopen_stage, sprinter_last_nopen_wd,
+		sprinter_last_nopen_ninode, sprinter_last_nopen_name0,
+		sprinter_last_nopen_char, udata.u_sysio, udata.u_error,
+		(uint16_t)(uarg_t)udata.u_root,
+		(uint16_t)(uarg_t)udata.u_cwd);
+	kprintf("dx bc=%x arm=%x seen=%x ex=%x isp=%x cs=%x csp=%x cst=%x\n",
+			spr_boot_count, spr_doexec_arm, spr_doexec_seen,
+			spr_doexec_expect, spr_doexec_isp, spr_doexec_call_seen,
+			spr_doexec_call_sp, spr_doexec_call_start);
+	kprintf("rx ue=%x pid=%x us=%x\n",
+		udata.u_error,
+		udata.u_ptab ? udata.u_ptab->p_pid : 0,
+		udata.u_sysio);
+#endif
 	PROC_TRACE(0xDA);
 	PROC_TRACE((uint8_t)udata.u_error);
 	PROC_TRACE((uint8_t)udata.u_retval);

@@ -1,0 +1,1162 @@
+mkdir 
+chmod  0755 
+mkdir bin
+chmod  0755 bin
+mkdir dev
+chmod  0755 dev
+mkdir etc
+chmod  0755 etc
+mkdir mnt
+chmod  0755 mnt
+mkdir tmp
+chmod  01777 tmp
+mkdir usr
+chmod  0755 usr
+mkdir var
+chmod  0755 var
+mkdir root
+chmod  0700 root
+cd /usr
+mkdir lib
+chmod  0755 lib
+mkdir bin
+chmod  0755 bin
+mkdir games
+chmod  0755 games
+cd /usr/games
+mkdir lib
+chmod  0755 lib
+cd /usr
+mkdir include
+chmod  0755 include
+mkdir share
+chmod  0755 share
+cd /usr/lib
+bget ./Standalone/filesystem-src/../../Library/libs/liberror.txt liberror.txt
+chmod 0644 liberror.txt
+cd /var
+mkdir spool
+chmod  0755 spool
+mkdir mail
+chmod  0755 mail
+mkdir run
+chmod  0755 run
+cd /dev
+mknod tty 20666, 512
+mknod tty1 20660, 513
+mknod tty2 20660, 514
+mknod tty3 20660, 515
+mknod tty4 20660, 516
+mknod tty5 20660, 517
+mknod tty6 20660, 518
+mknod tty7 20660, 519
+mknod tty8 20660, 520
+mknod hda 60660, 0
+mknod hda1 60660, 1
+mknod hda2 60660, 2
+mknod hda3 60660, 3
+mknod hda4 60660, 4
+mknod hda5 60660, 5
+mknod hda6 60660, 6
+mknod hda7 60660, 7
+mknod hda8 60660, 8
+mknod hda9 60660, 9
+mknod hda10 60660, 10
+mknod hda11 60660, 11
+mknod hda12 60660, 12
+mknod hda13 60660, 13
+mknod hda14 60660, 14
+mknod hda15 60660, 15
+mknod hdb 60660, 16
+mknod hdb1 60660, 17
+mknod hdb2 60660, 18
+mknod hdb3 60660, 19
+mknod hdb4 60660, 20
+mknod hdb5 60660, 21
+mknod hdb6 60660, 22
+mknod hdb7 60660, 23
+mknod hdb8 60660, 24
+mknod hdb9 60660, 25
+mknod hdb10 60660, 26
+mknod hdb11 60660, 27
+mknod hdb12 60660, 28
+mknod hdb13 60660, 29
+mknod hdb14 60660, 30
+mknod hdb15 60660, 31
+mknod hdc 60660, 32
+mknod hdc1 60660, 33
+mknod hdc2 60660, 34
+mknod hdc3 60660, 35
+mknod hdc4 60660, 36
+mknod hdc5 60660, 37
+mknod hdc6 60660, 38
+mknod hdc7 60660, 39
+mknod hdc8 60660, 40
+mknod hdc9 60660, 41
+mknod hdc10 60660, 42
+mknod hdc11 60660, 43
+mknod hdc12 60660, 44
+mknod hdc13 60660, 45
+mknod hdc14 60660, 46
+mknod hdc15 60660, 47
+mknod hdd 60660, 48
+mknod hdd1 60660, 49
+mknod hdd2 60660, 50
+mknod hdd3 60660, 51
+mknod hdd4 60660, 52
+mknod hdd5 60660, 53
+mknod hdd6 60660, 54
+mknod hdd7 60660, 55
+mknod hdd8 60660, 56
+mknod hdd9 60660, 57
+mknod hdd10 60660, 58
+mknod hdd11 60660, 59
+mknod hdd12 60660, 60
+mknod hdd13 60660, 61
+mknod hdd14 60660, 62
+mknod hdd15 60660, 63
+mknod fd0 60660, 256
+mknod fd1 60660, 257
+mknod fd2 60660, 258
+mknod fd3 60660, 259
+mknod lp0 20660, 768
+mknod lp1 20660, 769
+mknod null 20666, 1024
+mknod kmem 20660, 1025
+mknod zero 20444, 1026
+mknod proc 20666, 1027
+mknod mem 20660, 1028
+mknod rtc 20600, 1029
+mknod sys 20644, 1030
+mknod i2c 20600, 1031
+mknod gpio 20600, 1032
+mknod input 20600, 1090
+mknod rd0 60660, 2048
+mknod rd1 60661, 2049
+mknod rd2 60662, 2050
+mknod rd3 60663, 2051
+cd /etc
+bget ./Standalone/filesystem-src/etc-files/group group
+chmod 0644 group
+bget ./Standalone/filesystem-src/etc-files/issue issue
+chmod 0644 issue
+bget ./Standalone/filesystem-src/etc-files/motd motd
+chmod 0644 motd
+bget ./Standalone/filesystem-src/etc-files/passwd passwd
+chmod 0644 passwd
+bget ./Standalone/filesystem-src/etc-files/termcap termcap
+chmod 0644 termcap
+bget ./Standalone/filesystem-src/etc-files/rc rc
+chmod 0755 rc
+bget ./Standalone/filesystem-src/etc-files/rc.halt rc.halt
+chmod 0755 rc.halt
+bget ./Standalone/filesystem-src/etc-files/rc.reboot rc.reboot
+chmod 0755 rc.reboot
+bget ./Standalone/filesystem-src/etc-files/fstab fstab
+chmod 0644 fstab
+cd /
+bget ./Standalone/filesystem-src/../../Applications/util/init init
+chmod 0755 init
+cd /usr
+mkdir doc
+chmod  0755 doc
+mkdir man
+chmod  0755 man
+cd /usr/man
+mkdir man1
+chmod  0755 man1
+mkdir man2
+chmod  0755 man2
+mkdir man3
+chmod  0755 man3
+mkdir man4
+chmod  0755 man4
+mkdir man5
+chmod  0755 man5
+mkdir man6
+chmod  0755 man6
+mkdir man7
+chmod  0755 man7
+mkdir man8
+chmod  0755 man8
+cd /usr
+mkdir src
+chmod  0755 src
+cd /usr/include
+mkdir 6303
+chmod  0755 6303
+mkdir 6502
+chmod  0755 6502
+mkdir 6800
+chmod  0755 6800
+mkdir 6809
+chmod  0755 6809
+mkdir 68hc11
+chmod  0755 68hc11
+mkdir 68000
+chmod  0755 68000
+mkdir 8080
+chmod  0755 8080
+mkdir 8085
+chmod  0755 8085
+mkdir 8086
+chmod  0755 8086
+mkdir armm4
+chmod  0755 armm4
+mkdir arpa
+chmod  0755 arpa
+mkdir esp8266
+chmod  0755 esp8266
+mkdir msp430x
+chmod  0755 msp430x
+mkdir net
+chmod  0755 net
+mkdir netinet
+chmod  0755 netinet
+mkdir ns32k
+chmod  0755 ns32k
+mkdir pdp11
+chmod  0755 pdp11
+mkdir readline
+chmod  0755 readline
+mkdir riscv32
+chmod  0755 riscv32
+mkdir sys
+chmod  0755 sys
+mkdir tms9995
+chmod  0755 tms9995
+mkdir wrx6
+chmod  0755 wrx6
+bget ./Library/include/libgen.h libgen.h
+chmod 0644 libgen.h
+cd /usr/include/readline
+bget ./Library/include/readline/readline.h readline.h
+chmod 0644 readline.h
+cd /usr/include
+bget ./Library/include/stdlib.h stdlib.h
+chmod 0644 stdlib.h
+cd /usr/include/tms9995
+bget ./Library/include/tms9995/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/tms9995/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/tms9995/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/tms9995/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/stdio.h stdio.h
+chmod 0644 stdio.h
+cd /usr/include/8086
+bget ./Library/include/8086/stdint.h stdint.h
+chmod 0644 stdint.h
+cd /usr/include
+bget ./Library/include/errno.h errno.h
+chmod 0644 errno.h
+bget ./Library/include/gpt.h gpt.h
+chmod 0644 gpt.h
+bget ./Library/include/termcap.h termcap.h
+chmod 0644 termcap.h
+bget ./Library/include/search.h search.h
+chmod 0644 search.h
+bget ./Library/include/assert.h assert.h
+chmod 0644 assert.h
+cd /usr/include/ns32k
+bget ./Library/include/ns32k/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/ns32k/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/ns32k/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/ns32k/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/regmagic.h regmagic.h
+chmod 0644 regmagic.h
+bget ./Library/include/sysexits.h sysexits.h
+chmod 0644 sysexits.h
+bget ./Library/include/termios.h termios.h
+chmod 0644 termios.h
+bget ./Library/include/err.h err.h
+chmod 0644 err.h
+bget ./Library/include/time.h time.h
+chmod 0644 time.h
+bget ./Library/include/locale.h locale.h
+chmod 0644 locale.h
+bget ./Library/include/utsname.h utsname.h
+chmod 0644 utsname.h
+bget ./Library/include/unistd.h unistd.h
+chmod 0644 unistd.h
+bget ./Library/include/ftw.h ftw.h
+chmod 0644 ftw.h
+cd /usr/include/68000
+bget ./Library/include/68000/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/68000/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/68000/varargs.h varargs.h
+chmod 0644 varargs.h
+bget ./Library/include/68000/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/68000/stdatomic.h stdatomic.h
+chmod 0644 stdatomic.h
+bget ./Library/include/68000/limits.h limits.h
+chmod 0644 limits.h
+bget ./Library/include/68000/iso646.h iso646.h
+chmod 0644 iso646.h
+bget ./Library/include/68000/float.h float.h
+chmod 0644 float.h
+bget ./Library/include/68000/math-68881.h math-68881.h
+chmod 0644 math-68881.h
+bget ./Library/include/68000/stdfix.h stdfix.h
+chmod 0644 stdfix.h
+bget ./Library/include/68000/stdalign.h stdalign.h
+chmod 0644 stdalign.h
+bget ./Library/include/68000/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+bget ./Library/include/68000/syslimits.h syslimits.h
+chmod 0644 syslimits.h
+bget ./Library/include/68000/stdint-gcc.h stdint-gcc.h
+chmod 0644 stdint-gcc.h
+bget ./Library/include/68000/unwind.h unwind.h
+chmod 0644 unwind.h
+cd /usr/include/riscv32
+bget ./Library/include/riscv32/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/riscv32/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/riscv32/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/riscv32/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include/6502
+bget ./Library/include/6502/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/6502/dbg.h dbg.h
+chmod 0644 dbg.h
+bget ./Library/include/6502/dio.h dio.h
+chmod 0644 dio.h
+bget ./Library/include/6502/device.h device.h
+chmod 0644 device.h
+bget ./Library/include/6502/serial.h serial.h
+chmod 0644 serial.h
+bget ./Library/include/6502/conio.h conio.h
+chmod 0644 conio.h
+cd /usr/include
+bget ./Library/include/termio.h termio.h
+chmod 0644 termio.h
+bget ./Library/include/fenv.h fenv.h
+chmod 0644 fenv.h
+bget ./Library/include/utime.h utime.h
+chmod 0644 utime.h
+bget ./Library/include/libintl.h libintl.h
+chmod 0644 libintl.h
+bget ./Library/include/grp.h grp.h
+chmod 0644 grp.h
+bget ./Library/include/string.h string.h
+chmod 0644 string.h
+bget ./Library/include/aes256.h aes256.h
+chmod 0644 aes256.h
+bget ./Library/include/features.h features.h
+chmod 0644 features.h
+cd /usr/include/6303
+bget ./Library/include/6303/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/6303/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/6303/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/6303/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/pwd.h pwd.h
+chmod 0644 pwd.h
+cd /usr/include/esp8266
+bget ./Library/include/esp8266/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/esp8266/stdint-gcc.h stdint-gcc.h
+chmod 0644 stdint-gcc.h
+cd /usr/include/armm4
+bget ./Library/include/armm4/stdint.h stdint.h
+chmod 0644 stdint.h
+cd /usr/include
+bget ./Library/include/malloc.h malloc.h
+chmod 0644 malloc.h
+bget ./Library/include/signal.h signal.h
+chmod 0644 signal.h
+cd /usr/include/netinet
+bget ./Library/include/netinet/in.h in.h
+chmod 0644 in.h
+cd /usr/include
+bget ./Library/include/ctype.h ctype.h
+chmod 0644 ctype.h
+cd /usr/include/6800
+bget ./Library/include/6800/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/6800/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/6800/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/6800/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/varargs.h varargs.h
+chmod 0644 varargs.h
+bget ./Library/include/getopt.h getopt.h
+chmod 0644 getopt.h
+cd /usr/include/msp430x
+bget ./Library/include/msp430x/stdint.h stdint.h
+chmod 0644 stdint.h
+cd /usr/include/wrx6
+bget ./Library/include/wrx6/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/wrx6/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/wrx6/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/wrx6/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include/sys
+bget ./Library/include/sys/netdev.h netdev.h
+chmod 0644 netdev.h
+bget ./Library/include/sys/errno.h errno.h
+chmod 0644 errno.h
+bget ./Library/include/sys/kd.h kd.h
+chmod 0644 kd.h
+bget ./Library/include/sys/ioctl.h ioctl.h
+chmod 0644 ioctl.h
+bget ./Library/include/sys/net_native.h net_native.h
+chmod 0644 net_native.h
+bget ./Library/include/sys/library.h library.h
+chmod 0644 library.h
+bget ./Library/include/sys/time.h time.h
+chmod 0644 time.h
+bget ./Library/include/sys/utsname.h utsname.h
+chmod 0644 utsname.h
+bget ./Library/include/sys/fp.h fp.h
+chmod 0644 fp.h
+bget ./Library/include/sys/gpio.h gpio.h
+chmod 0644 gpio.h
+bget ./Library/include/sys/socket.h socket.h
+chmod 0644 socket.h
+bget ./Library/include/sys/signal.h signal.h
+chmod 0644 signal.h
+bget ./Library/include/sys/super.h super.h
+chmod 0644 super.h
+bget ./Library/include/sys/lock.h lock.h
+chmod 0644 lock.h
+bget ./Library/include/sys/param.h param.h
+chmod 0644 param.h
+bget ./Library/include/sys/compiler.h compiler.h
+chmod 0644 compiler.h
+bget ./Library/include/sys/drivewire.h drivewire.h
+chmod 0644 drivewire.h
+bget ./Library/include/sys/resource.h resource.h
+chmod 0644 resource.h
+bget ./Library/include/sys/wait.h wait.h
+chmod 0644 wait.h
+bget ./Library/include/sys/rtc.h rtc.h
+chmod 0644 rtc.h
+bget ./Library/include/sys/statfs.h statfs.h
+chmod 0644 statfs.h
+bget ./Library/include/sys/statvfs.h statvfs.h
+chmod 0644 statvfs.h
+bget ./Library/include/sys/swap.h swap.h
+chmod 0644 swap.h
+bget ./Library/include/sys/exec.h exec.h
+chmod 0644 exec.h
+bget ./Library/include/sys/cdefs.h cdefs.h
+chmod 0644 cdefs.h
+bget ./Library/include/sys/mman.h mman.h
+chmod 0644 mman.h
+bget ./Library/include/sys/mount.h mount.h
+chmod 0644 mount.h
+bget ./Library/include/sys/graphics.h graphics.h
+chmod 0644 graphics.h
+bget ./Library/include/sys/input.h input.h
+chmod 0644 input.h
+bget ./Library/include/sys/times.h times.h
+chmod 0644 times.h
+bget ./Library/include/sys/stat.h stat.h
+chmod 0644 stat.h
+bget ./Library/include/sys/seek.h seek.h
+chmod 0644 seek.h
+bget ./Library/include/sys/file.h file.h
+chmod 0644 file.h
+bget ./Library/include/sys/types.h types.h
+chmod 0644 types.h
+bget ./Library/include/sys/userstructs.h userstructs.h
+chmod 0644 userstructs.h
+cd /usr/include/6809
+bget ./Library/include/6809/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/6809/sys.h sys.h
+chmod 0644 sys.h
+cd /usr/include/net
+bget ./Library/include/net/if.h if.h
+chmod 0644 if.h
+cd /usr/include
+bget ./Library/include/wait.h wait.h
+chmod 0644 wait.h
+bget ./Library/include/setjmp.h setjmp.h
+chmod 0644 setjmp.h
+bget ./Library/include/ar.h ar.h
+chmod 0644 ar.h
+cd /usr/include/68hc11
+bget ./Library/include/68hc11/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/68hc11/stddef.h stddef.h
+chmod 0644 stddef.h
+cd /usr/include
+bget ./Library/include/mntent.h mntent.h
+chmod 0644 mntent.h
+bget ./Library/include/limits.h limits.h
+chmod 0644 limits.h
+bget ./Library/include/curses.h curses.h
+chmod 0644 curses.h
+bget ./Library/include/syscalls.h syscalls.h
+chmod 0644 syscalls.h
+cd /usr/include/8085
+bget ./Library/include/8085/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/8085/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/8085/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/8085/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/proc.h proc.h
+chmod 0644 proc.h
+bget ./Library/include/dirent.h dirent.h
+chmod 0644 dirent.h
+bget ./Library/include/float.h float.h
+chmod 0644 float.h
+bget ./Library/include/math.h math.h
+chmod 0644 math.h
+bget ./Library/include/cpu_ioctl.h cpu_ioctl.h
+chmod 0644 cpu_ioctl.h
+bget ./Library/include/alloc.h alloc.h
+chmod 0644 alloc.h
+bget ./Library/include/paths.h paths.h
+chmod 0644 paths.h
+bget ./Library/include/memory.h memory.h
+chmod 0644 memory.h
+cd /usr/include/pdp11
+bget ./Library/include/pdp11/stdint.h stdint.h
+chmod 0644 stdint.h
+cd /usr/include
+bget ./Library/include/utmp.h utmp.h
+chmod 0644 utmp.h
+bget ./Library/include/fcntl.h fcntl.h
+chmod 0644 fcntl.h
+cd /usr/include/8080
+bget ./Library/include/8080/stdint.h stdint.h
+chmod 0644 stdint.h
+bget ./Library/include/8080/stddef.h stddef.h
+chmod 0644 stddef.h
+bget ./Library/include/8080/stdarg.h stdarg.h
+chmod 0644 stdarg.h
+bget ./Library/include/8080/stdbool.h stdbool.h
+chmod 0644 stdbool.h
+cd /usr/include
+bget ./Library/include/ncurses.h ncurses.h
+chmod 0644 ncurses.h
+bget ./Library/include/strings.h strings.h
+chmod 0644 strings.h
+cd /usr/include/arpa
+bget ./Library/include/arpa/inet.h inet.h
+chmod 0644 inet.h
+cd /usr/include
+bget ./Library/include/mbr.h mbr.h
+chmod 0644 mbr.h
+bget ./Library/include/types.h types.h
+chmod 0644 types.h
+bget ./Library/include/poll.h poll.h
+chmod 0644 poll.h
+bget ./Library/include/regexp.h regexp.h
+chmod 0644 regexp.h
+cd /usr/lib
+bget ./Library/libs/libc.a libc.a
+chmod 0644 libc.a
+bget ./Library/libs/libcurses.a libcurses.a
+chmod 0644 libcurses.a
+bget ./Library/libs/libreadline.a libreadline.a
+chmod 0644 libreadline.a
+bget ./Library/libs/libtermcap.a libtermcap.a
+chmod 0644 libtermcap.a
+bget ./Library/libs/crt0.o crt0.o
+chmod 0644 crt0.o
+cd /bin
+bget ./Applications/V7/cmd/ed ed
+chmod 0755 ed
+cd /usr/bin
+bget ./Applications/V7/cmd/accton accton
+chmod 0755 accton
+bget ./Applications/V7/cmd/atrun atrun
+chmod 0755 atrun
+bget ./Applications/V7/cmd/clear clear
+chmod 0755 clear
+bget ./Applications/V7/cmd/comm comm
+chmod 0755 comm
+bget ./Applications/V7/cmd/cron cron
+chmod 0755 cron
+bget ./Applications/V7/cmd/crypt crypt
+chmod 0755 crypt
+bget ./Applications/V7/cmd/dc dc
+chmod 0755 dc
+bget ./Applications/V7/cmd/diff diff
+chmod 0755 diff
+bget ./Applications/V7/cmd/diff3 diff3
+chmod 0755 diff3
+bget ./Applications/V7/cmd/diffh diffh
+chmod 0755 diffh
+bget ./Applications/V7/cmd/join join
+chmod 0755 join
+bget ./Applications/V7/cmd/look look
+chmod 0755 look
+bget ./Applications/V7/cmd/makekey makekey
+chmod 0755 makekey
+bget ./Applications/V7/cmd/mesg mesg
+chmod 0755 mesg
+bget ./Applications/V7/cmd/newgrp newgrp
+chmod 0755 newgrp
+bget ./Applications/V7/cmd/ptx ptx
+chmod 0755 ptx
+bget ./Applications/V7/cmd/rev rev
+chmod 0755 rev
+bget ./Applications/V7/cmd/split split
+chmod 0755 split
+bget ./Applications/V7/cmd/sum sum
+chmod 0755 sum
+bget ./Applications/V7/cmd/time time
+chmod 0755 time
+bget ./Applications/V7/cmd/tsort tsort
+chmod 0755 tsort
+bget ./Applications/V7/cmd/wall wall
+chmod 0755 wall
+bget ./Applications/V7/cmd/pg pg
+chmod 0755 pg
+cd /usr/man/man1
+bget ./Applications/V7/cmd/comm.1 comm.1
+chmod 0644 comm.1
+cd /usr/man/man8
+bget ./Applications/V7/cmd/cron.8 cron.8
+chmod 0644 cron.8
+cd /usr/man/man1
+bget ./Applications/V7/cmd/crypt.1 crypt.1
+chmod 0644 crypt.1
+bget ./Applications/V7/cmd/dc.1 dc.1
+chmod 0644 dc.1
+bget ./Applications/V7/cmd/diff.1 diff.1
+chmod 0644 diff.1
+bget ./Applications/V7/cmd/diff3.1 diff3.1
+chmod 0644 diff3.1
+bget ./Applications/V7/cmd/join.1 join.1
+chmod 0644 join.1
+bget ./Applications/V7/cmd/look.1 look.1
+chmod 0644 look.1
+cd /usr/man/man8
+bget ./Applications/V7/cmd/makekey.8 makekey.8
+chmod 0644 makekey.8
+cd /usr/man/man1
+bget ./Applications/V7/cmd/mesg.1 mesg.1
+chmod 0644 mesg.1
+bget ./Applications/V7/cmd/newgrp.1 newgrp.1
+chmod 0644 newgrp.1
+bget ./Applications/V7/cmd/ptx.1 ptx.1
+chmod 0644 ptx.1
+bget ./Applications/V7/cmd/rev.1 rev.1
+chmod 0644 rev.1
+bget ./Applications/V7/cmd/split.1 split.1
+chmod 0644 split.1
+bget ./Applications/V7/cmd/sum.1 sum.1
+chmod 0644 sum.1
+bget ./Applications/V7/cmd/time.1 time.1
+chmod 0644 time.1
+bget ./Applications/V7/cmd/tsort.1 tsort.1
+chmod 0644 tsort.1
+bget ./Applications/V7/cmd/wall.1m wall.1
+chmod 0644 wall.1
+cd /bin
+bget ./Applications/V7/cmd/sh/sh sh
+chmod 0755 sh
+bget ./Applications/V7/cmd/sh/fsh fsh
+chmod 0755 fsh
+cd /usr/man/man1
+bget ./Applications/V7/cmd/sh/sh.1 sh.1
+chmod 0644 sh.1
+bget ./Applications/V7/cmd/sh/sh.1 fsh.1
+chmod 0644 fsh.1
+cd /usr/games
+bget ./Applications/V7/games/arithmetic arithmetic
+chmod 0755 arithmetic
+bget ./Applications/V7/games/backgammon backgammon
+chmod 0755 backgammon
+bget ./Applications/V7/games/fish fish
+chmod 0755 fish
+bget ./Applications/V7/games/wump wump
+chmod 0755 wump
+cd /usr/man/man6
+bget ./Applications/V7/games/arithmetic.6 arithmetic.6
+chmod 0644 arithmetic.6
+bget ./Applications/V7/games/backgammon.6 backgammon.6
+chmod 0644 backgammon.6
+bget ./Applications/V7/games/wump.6 wump.6
+chmod 0644 wump.6
+cd /etc
+bget ./Applications/netd/netrc netrc
+chmod 0644 netrc
+bget ./Applications/netd/resolv.conf resolv.conf
+chmod 0644 resolv.conf
+cd /usr/bin
+bget ./Applications/netd/dig dig
+chmod 0755 dig
+bget ./Applications/netd/echoping echoping
+chmod 0755 echoping
+bget ./Applications/netd/telnet telnet
+chmod 0755 telnet
+bget ./Applications/netd/ping ping
+chmod 0755 ping
+bget ./Applications/netd/ntpdate ntpdate
+chmod 0755 ntpdate
+bget ./Applications/netd/httpd httpd
+chmod 0755 httpd
+bget ./Applications/netd/htget htget
+chmod 0755 htget
+bget ./Applications/netd/tinyirc tinyirc
+chmod 0755 tinyirc
+bget ./Applications/netd/ifconfig ifconfig
+chmod 0755 ifconfig
+cd /dev
+mknod net 20666, 1089
+cd /usr/bin
+bget ./Applications/netd/netd-lwwire netd-lwwire
+chmod 0755 netd-lwwire
+cd /dev
+mknod dw0 060666, 2048
+cd /usr/bin
+bget ./Applications/netd/netd-slip netd-slip
+chmod 0755 netd-slip
+bget ./Applications/assembler/as as
+chmod 0755 as
+bget ./Applications/assembler/dumprelocs dumprelocs
+chmod 0755 dumprelocs
+bget ./Applications/assembler/ld ld
+chmod 0755 ld
+bget ./Applications/assembler/nm nm
+chmod 0755 nm
+bget ./Applications/assembler/osize osize
+chmod 0755 osize
+cd /bin
+bget ./Applications/util/basename basename
+chmod 0755 basename
+bget ./Applications/util/cat cat
+chmod 0755 cat
+bget ./Applications/util/chmod chmod
+chmod 0755 chmod
+bget ./Applications/util/cmp cmp
+chmod 0755 cmp
+bget ./Applications/util/cp cp
+chmod 0755 cp
+ln /bin/cp /bin/mv
+ln /bin/cp /bin/ln
+bget ./Applications/util/date date
+chmod 0755 date
+bget ./Applications/util/dd dd
+chmod 0755 dd
+bget ./Applications/util/df df
+chmod 0755 df
+bget ./Applications/util/echo echo
+chmod 0755 echo
+bget ./Applications/util/fgrep fgrep
+chmod 0755 fgrep
+bget ./Applications/util/kill kill
+chmod 0755 kill
+bget ./Applications/util/killall killall
+chmod 0755 killall
+bget ./Applications/util/ls ls
+chmod 0755 ls
+bget ./Applications/util/mkdir mkdir
+chmod 0755 mkdir
+bget ./Applications/util/mkfs mkfs
+chmod 0755 mkfs
+bget ./Applications/util/mknod mknod
+chmod 0755 mknod
+bget ./Applications/util/mount mount
+chmod 0755 mount
+bget ./Applications/util/prtroot prtroot
+chmod 0755 prtroot
+bget ./Applications/util/ps ps
+chmod 0755 ps
+bget ./Applications/util/pwd pwd
+chmod 0755 pwd
+bget ./Applications/util/reboot reboot
+chmod 0755 reboot
+ln /bin/reboot /bin/halt
+ln /bin/reboot /bin/shutdown
+bget ./Applications/util/remount remount
+chmod 0755 remount
+bget ./Applications/util/rm rm
+chmod 0755 rm
+bget ./Applications/util/rmdir rmdir
+chmod 0755 rmdir
+bget ./Applications/util/setdate setdate
+chmod 0755 setdate
+bget ./Applications/util/ssh ssh
+chmod 0755 ssh
+bget ./Applications/util/stty stty
+chmod 0755 stty
+bget ./Applications/util/sync sync
+chmod 0755 sync
+bget ./Applications/util/touch touch
+chmod 0755 touch
+bget ./Applications/util/tr tr
+chmod 0755 tr
+bget ./Applications/util/umount umount
+chmod 0755 umount
+bget ./Applications/util/fsck fsck
+chmod 0755 fsck
+bget ./Applications/util/fsck-fuzix fsck-fuzix
+chmod 0755 fsck-fuzix
+bget ./Applications/util/substroot substroot
+chmod 0755 substroot
+bget ./Applications/util/banner banner
+chmod 0755 banner
+bget ./Applications/util/border border
+chmod 0755 border
+ln /bin/border /bin/ink
+ln /bin/border /bin/paper
+bget ./Applications/util/bd bd
+chmod 0755 bd
+bget ./Applications/util/cal cal
+chmod 0755 cal
+bget ./Applications/util/chgrp chgrp
+chmod 0755 chgrp
+bget ./Applications/util/chmem chmem
+chmod 0755 chmem
+bget ./Applications/util/chown chown
+chmod 0755 chown
+bget ./Applications/util/cksum cksum
+chmod 0755 cksum
+bget ./Applications/util/cut cut
+chmod 0755 cut
+bget ./Applications/util/decomp16 decomp16
+chmod 0755 decomp16
+bget ./Applications/util/dirname dirname
+chmod 0755 dirname
+bget ./Applications/util/dosread dosread
+chmod 0755 dosread
+ln /bin/dosread /bin/dosdir
+ln /bin/dosread /bin/doswrite
+ln /bin/dosread /bin/dosdel
+bget ./Applications/util/env env
+chmod 0755 env
+bget ./Applications/util/factor factor
+chmod 0755 factor
+bget ./Applications/util/false false
+chmod 0755 false
+bget ./Applications/util/fdisk fdisk
+chmod 0755 fdisk
+bget ./Applications/util/free free
+chmod 0755 free
+cd /usr/bin
+bget ./Applications/util/gpiotool gpiotool
+chmod 0755 gpiotool
+cd /bin
+bget ./Applications/util/gptparse gptparse
+chmod 0755 gptparse
+bget ./Applications/util/grep grep
+chmod 0755 grep
+bget ./Applications/util/groups groups
+chmod 0755 groups
+bget ./Applications/util/head head
+chmod 0755 head
+bget ./Applications/util/id id
+chmod 0755 id
+bget ./Applications/util/kbdrate kbdrate
+chmod 0755 kbdrate
+bget ./Applications/util/less less
+chmod 0755 less
+bget ./Applications/util/ll ll
+chmod 0755 ll
+bget ./Applications/util/logname logname
+chmod 0755 logname
+bget ./Applications/util/mail mail
+chmod 0755 mail
+bget ./Applications/util/man man
+chmod 0755 man
+bget ./Applications/util/mkfifo mkfifo
+chmod 0755 mkfifo
+bget ./Applications/util/mode mode
+chmod 0755 mode
+bget ./Applications/util/more more
+chmod 0755 more
+bget ./Applications/util/nvtool nvtool
+chmod 0755 nvtool
+bget ./Applications/util/od od
+chmod 0755 od
+ln /bin/od /bin/hd
+bget ./Applications/util/pagesize pagesize
+chmod 0755 pagesize
+bget ./Applications/util/passwd passwd
+chmod 0755 passwd
+bget ./Applications/util/printenv printenv
+chmod 0755 printenv
+bget ./Applications/util/sed sed
+chmod 0755 sed
+bget ./Applications/util/setboot setboot
+chmod 0755 setboot
+bget ./Applications/util/seq seq
+chmod 0755 seq
+bget ./Applications/util/sleep sleep
+chmod 0755 sleep
+bget ./Applications/util/sort sort
+chmod 0755 sort
+bget ./Applications/util/sum sum
+chmod 0755 sum
+bget ./Applications/util/su su
+chmod 0755 su
+bget ./Applications/util/swapon swapon
+chmod 0755 swapon
+bget ./Applications/util/tail tail
+chmod 0755 tail
+bget ./Applications/util/tar tar
+chmod 0755 tar
+cd /usr/lib
+bget ./Applications/util/tchelp tchelp
+chmod 0755 tchelp
+cd /bin
+bget ./Applications/util/tee tee
+chmod 0755 tee
+bget ./Applications/util/telinit telinit
+chmod 0755 telinit
+bget ./Applications/util/termcap termcap
+chmod 0755 termcap
+bget ./Applications/util/tget tget
+chmod 0755 tget
+bget ./Applications/util/true true
+chmod 0755 true
+bget ./Applications/util/uname uname
+chmod 0755 uname
+bget ./Applications/util/uniq uniq
+chmod 0755 uniq
+bget ./Applications/util/uptime uptime
+chmod 0755 uptime
+bget ./Applications/util/uud uud
+chmod 0755 uud
+bget ./Applications/util/uue uue
+chmod 0755 uue
+bget ./Applications/util/cu cu
+chmod 0755 cu
+bget ./Applications/util/vile vile
+chmod 0755 vile
+ln /bin/vile /bin/vi
+bget ./Applications/util/wc wc
+chmod 0755 wc
+bget ./Applications/util/which which
+chmod 0755 which
+bget ./Applications/util/who who
+chmod 0755 who
+ln /bin/who /bin/users
+bget ./Applications/util/whoami whoami
+chmod 0755 whoami
+bget ./Applications/util/write write
+chmod 0755 write
+bget ./Applications/util/xargs xargs
+chmod 0755 xargs
+bget ./Applications/util/yes yes
+chmod 0755 yes
+cd /usr/man/man1
+bget ./Applications/util/cp.1 cp.1
+chmod 0655 cp.1
+bget ./Applications/util/cpuinfo.1 cpuinfo.1
+chmod 0655 cpuinfo.1
+bget ./Applications/util/date.1 date.1
+chmod 0655 date.1
+bget ./Applications/util/less.1 less.1
+chmod 0655 less.1
+bget ./Applications/util/man.1 man.1
+chmod 0655 man.1
+bget ./Applications/util/mkdir.1 mkdir.1
+chmod 0655 mkdir.1
+bget ./Applications/util/mv.1 mv.1
+chmod 0655 mv.1
+bget ./Applications/util/ps.1 ps.1
+chmod 0655 ps.1
+bget ./Applications/util/size.1 size.1
+chmod 0655 size.1
+bget ./Applications/util/substroot.1 substroot.1
+chmod 0655 substroot.1
+bget ./Applications/util/cu.1 cu.1
+chmod 0655 cu.1
+cd /usr/games
+bget ./Applications/cave/advent advent
+chmod 0755 advent
+cd /usr/games/lib
+bget ./Applications/cave/advent.db advent.db
+chmod 0644 advent.db
+cd /bin
+bget ./Applications/flashrom/flashrom flashrom
+chmod 0755 flashrom
+bget ./Applications/ue/ue ue
+chmod 0755 ue
+cd /usr/bin
+bget ./Applications/cpp/cpp cpp
+chmod 0755 cpp
+bget ./Applications/dw/dw dw
+chmod 0755 dw
+bget ./Applications/dw/dwgetty dwgetty
+chmod 0755 dwgetty
+bget ./Applications/dw/dwterm dwterm
+chmod 0755 dwterm
+bget ./Applications/dw/dwdate dwdate
+chmod 0755 dwdate
+cd /usr/man/man1
+bget ./Applications/dw/dwdate.1 dwdate.1
+chmod 0644 dwdate.1
+cd /usr/bin
+bget ./Applications/MWC/cmd/ac ac
+chmod 0755 ac
+bget ./Applications/MWC/cmd/almanac almanac
+chmod 0755 almanac
+bget ./Applications/MWC/cmd/at at
+chmod 0755 at
+bget ./Applications/MWC/cmd/calendar calendar
+chmod 0755 calendar
+bget ./Applications/MWC/cmd/col col
+chmod 0755 col
+bget ./Applications/MWC/cmd/deroff deroff
+chmod 0755 deroff
+cd /bin
+bget ./Applications/MWC/cmd/du du
+chmod 0755 du
+cd /usr/bin
+bget ./Applications/MWC/cmd/expr expr
+chmod 0755 expr
+bget ./Applications/MWC/cmd/find find
+chmod 0755 find
+bget ./Applications/MWC/cmd/m4 m4
+chmod 0755 m4
+bget ./Applications/MWC/cmd/make make
+chmod 0755 make
+cd /usr/games
+bget ./Applications/MWC/cmd/moo moo
+chmod 0755 moo
+cd /usr/bin
+bget ./Applications/MWC/cmd/pr pr
+chmod 0755 pr
+bget ./Applications/MWC/cmd/test test
+chmod 0755 test
+ln /usr/bin/test /usr/bin/[
+cd /usr/games
+bget ./Applications/MWC/cmd/ttt ttt
+chmod 0755 ttt
+bget ./Applications/games/adv01 adv01
+chmod 0755 adv01
+bget ./Applications/games/adv02 adv02
+chmod 0755 adv02
+bget ./Applications/games/adv03 adv03
+chmod 0755 adv03
+bget ./Applications/games/adv04 adv04
+chmod 0755 adv04
+bget ./Applications/games/adv05 adv05
+chmod 0755 adv05
+bget ./Applications/games/adv06 adv06
+chmod 0755 adv06
+bget ./Applications/games/adv07 adv07
+chmod 0755 adv07
+bget ./Applications/games/adv08 adv08
+chmod 0755 adv08
+bget ./Applications/games/adv09 adv09
+chmod 0755 adv09
+bget ./Applications/games/adv10 adv10
+chmod 0755 adv10
+bget ./Applications/games/adv11 adv11
+chmod 0755 adv11
+bget ./Applications/games/adv12 adv12
+chmod 0755 adv12
+bget ./Applications/games/adv13 adv13
+chmod 0755 adv13
+bget ./Applications/games/adv14a adv14a
+chmod 0755 adv14a
+bget ./Applications/games/adv14b adv14b
+chmod 0755 adv14b
+bget ./Applications/games/advint advint
+chmod 0755 advint
+bget ./Applications/games/cowsay cowsay
+chmod 0755 cowsay
+bget ./Applications/games/fortune fortune
+chmod 0755 fortune
+bget ./Applications/games/fortune-gen fortune-gen
+chmod 0755 fortune-gen
+bget ./Applications/games/fortune.dat fortune.dat
+chmod 0644 fortune.dat
+bget ./Applications/games/hamurabi hamurabi
+chmod 0755 hamurabi
+bget ./Applications/games/myst01 myst01
+chmod 0755 myst01
+bget ./Applications/games/myst02 myst02
+chmod 0755 myst02
+bget ./Applications/games/myst03 myst03
+chmod 0755 myst03
+bget ./Applications/games/myst04 myst04
+chmod 0755 myst04
+bget ./Applications/games/myst05 myst05
+chmod 0755 myst05
+bget ./Applications/games/myst06 myst06
+chmod 0755 myst06
+bget ./Applications/games/myst07 myst07
+chmod 0755 myst07
+bget ./Applications/games/myst08 myst08
+chmod 0755 myst08
+bget ./Applications/games/myst09 myst09
+chmod 0755 myst09
+bget ./Applications/games/myst10 myst10
+chmod 0755 myst10
+bget ./Applications/games/myst11 myst11
+chmod 0755 myst11
+bget ./Applications/games/qrun qrun
+chmod 0755 qrun
+bget ./Applications/games/l9x l9x
+chmod 0755 l9x
+bget ./Applications/games/startrek startrek
+chmod 0755 startrek
+cd /usr/lib
+mkdir trek
+chmod  0711 trek
+cd /usr/lib/trek
+bget ./Applications/games/startrek.doc startrek.doc
+chmod 0755 startrek.doc
+bget ./Applications/games/startrek.fatal startrek.fatal
+chmod 0755 startrek.fatal
+bget ./Applications/games/startrek.intro startrek.intro
+chmod 0755 startrek.intro
+bget ./Applications/games/startrek.logo startrek.logo
+chmod 0755 startrek.logo
+cd /usr/games
+bget ./Applications/games/taylormade taylormade
+chmod 0755 taylormade
+bget ./Applications/games/z1 z1
+chmod 0755 z1
+bget ./Applications/games/z2 z2
+chmod 0755 z2
+bget ./Applications/games/z3 z3
+chmod 0755 z3
+bget ./Applications/games/z4 z4
+chmod 0755 z4
+bget ./Applications/games/z5 z5
+chmod 0755 z5
+bget ./Applications/games/z8 z8
+chmod 0755 z8
+bget ./Applications/games/2048/2048 2048
+chmod 0755 2048
+bget ./Applications/cursesgames/invaders invaders
+chmod 0755 invaders
+cd /usr/bin
+bget ./Applications/ld09/ld09 ld09
+chmod 0755 ld09
+rm /init
+cd /
+bget ./Kernel/platform/platform-sprinter/../../../Applications/util/sprinit init
+chmod 0755 init

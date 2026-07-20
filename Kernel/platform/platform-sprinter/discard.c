@@ -14,7 +14,9 @@
 
 extern void plt_trace(uint8_t code);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern void sprinter_bootmark(char c);
 extern void pagemap_reset_pool(void);
+extern uint8_t sprinter_dbg[];
 #endif
 
 void sprinter_restore_devsw(void)
@@ -106,12 +108,30 @@ void map_init(void)
 	 * Later _execve reads the corrupted bytes via ugetc, fails to
 	 * resolve the path and panics with PANIC_NOINIT.
 	 *
-	 * pagemap_alloc uses init_process->p_top (set to PROGLOAD+512 by
-	 * create_init) to compute how many 16 KB pages the process needs
-	 * and fills p_page from the free pool (populated by pagemap_init
-	 * above).  After this map_proc_2 will map real user pages into
-	 * WIN0..WIN2 and early writes land in actual user RAM.
+	 * start.c::create_init() now gets init_process via ptab_alloc(),
+	 * which has already called pagemap_alloc().  Keep this hook as a
+	 * guarded fallback for trace bring-up, but do not allocate or seed a
+	 * second page set when p_page is already populated.
 	 */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('p');
+	if (init_process) {
+		uint8_t *pp = (uint8_t *)&init_process->p_page;
+		if (pp[0] == 0) {
+			if (pagemap_alloc(init_process) != 0)
+				panic("map_init: no pages");
+			sprinter_bootmark('q');
+		} else {
+			sprinter_bootmark('Q');
+		}
+		sprinter_dbg[24] = pp[0];
+		sprinter_dbg[25] = pp[1];
+		sprinter_dbg[26] = pp[2];
+		sprinter_dbg[27] = pp[3];
+		sprinter_dbg[28] = pp[3];
+		sprinter_bootmark('t');
+	}
+#else
 	if (init_process && pagemap_alloc(init_process) != 0)
 		panic("map_init: no pages");
 	/*
@@ -130,4 +150,5 @@ void map_init(void)
 		uint8_t top = ((uint8_t *)&init_process->p_page)[3];
 		sprinter_seed_common(top);
 	}
+#endif
 }

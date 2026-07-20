@@ -212,3 +212,20 @@ banner_text:
 	.ds 630
 
 	.area _BUFFERS
+;
+; Buffers. Keep the initial block cache out of kdata/common so it does
+; not overlap the common-memory kernel stack on Sprinter.
+;
+	.globl _bufpool
+
+_bufpool:
+	.ds BUFSIZE * NBUFS
+
+;
+; Sprinter IDE PIO bounce buffer. Keep it in _BUFFERS so it lives in
+; stable low kernel RAM without shifting _COMMONMEM/_COMMONDATA.
+;
+	.globl _sprinter_ide_bounce
+
+_sprinter_ide_bounce:
+	.ds 256

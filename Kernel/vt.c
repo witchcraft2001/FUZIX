@@ -4,6 +4,13 @@
 
 #ifdef CONFIG_VT
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t sprinter_dbg[];
+extern uint8_t sprinter_exec_fail_stage;
+extern uint16_t sprinter_exec_fail_err;
+extern uint16_t sprinter_exec_fail_name;
+#endif
+
 
 #include <devtty.h>
 /*
@@ -105,6 +112,10 @@ static void cursor_fix(void)
 
 static void charout(unsigned char c)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE6;
+	sprinter_dbg[18] = c;
+#endif
 	/* Fast path printable symbols */
 	if (c <= 0x1b) {
 		if (c == 7) {
@@ -134,11 +145,65 @@ static void charout(unsigned char c)
 			return;
 		}
 	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE7;
+	sprinter_dbg[19] = (uint8_t)cursory;
+	sprinter_dbg[20] = (uint8_t)cursorx;
+#endif
 	plot_char(cursory, cursorx, c);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE8;
+#endif
 	cursorx++;
 fix:
 	cursor_fix();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE9;
+	sprinter_dbg[19] = (uint8_t)cursory;
+	sprinter_dbg[20] = (uint8_t)cursorx;
+#endif
 }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+static uint8_t sprinter_wrap_c;
+
+static void sprinter_charout_wrap(unsigned char c)
+{
+	sprinter_wrap_c = c;
+	sprinter_exec_fail_stage = 0xA1;
+	sprinter_exec_fail_err = c;
+	__asm
+		ld	a, (#_sprinter_wrap_c)
+		push	af
+		inc	sp
+		push	af
+		ld	hl, #001$
+		push	hl
+		ld	hl, #0
+		add	hl, sp
+		ld	a, #0xa2
+		ld	(#_sprinter_exec_fail_stage), a
+		ld	a, l
+		ld	(#_sprinter_exec_fail_err), a
+		ld	a, (hl)
+		ld	(#_sprinter_exec_fail_name), a
+		inc	hl
+		ld	a, (hl)
+		ld	(#(_sprinter_exec_fail_name + 0x0001)), a
+		ld	a, #0xa3
+		ld	(#_sprinter_exec_fail_stage), a
+		jp	_charout
+001$:
+		pop	af
+		inc	sp
+		ld	hl, #(_sprinter_dbg + 0x000f)
+		ld	(hl), #0xF1
+		ld	hl, #(_sprinter_dbg + 0x0010)
+		ld	a, (#_sprinter_wrap_c)
+		ld	(hl), a
+	__endasm;
+}
+#endif
 
 
 static int escout(unsigned char c)
@@ -227,6 +292,19 @@ void vtoutput(unsigned char *p, unsigned int len)
 {
 	irqflags_t irq;
 	uint8_t cq;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	uint8_t busy;
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE4;
+	sprinter_dbg[16] = *p;
+	sprinter_dbg[17] = (uint8_t)len;
+	sprinter_exec_fail_stage = 0;
+	sprinter_exec_fail_err = 0;
+	sprinter_exec_fail_name = 0;
+	sprinter_dbg[18] = 0;
+#endif
 
 	/* We can get re-entry into the vt code from tty echo. This is one of
 	   the few places in Fuzix interrupts bite us this way.
@@ -236,22 +314,79 @@ void vtoutput(unsigned char *p, unsigned int len)
 	   in theory might lose the odd echo - but the same occurs with real
 	   uarts. If anyone actually has printing code slow enough this is a
 	   problem then vtpend can turn into a small queue */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	vtbusy = 1;
+	sprinter_dbg[15] = 0xE5;
+#else
 	irq = di();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xEC;
+#endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	busy = vtbusy;
+	sprinter_dbg[15] = 0xF0;
+	sprinter_dbg[18] = busy;
+	if (busy) {
+#else
 	if (vtbusy) {
+#endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xED;
+#endif
 		vtpend = *p;
 		irqrestore(irq);
 		return;
 	}
 	vtbusy = 1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xEE;
+#endif
 	irqrestore(irq);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xEF;
+	sprinter_dbg[15] = 0xE5;
+#endif
+#endif
 	vt_cursor_off();
 	/* FIXME: do we ever get called with len > 1, if not we could strip
 	   this right down */
 	do {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		for (;;) {
+			sprinter_dbg[15] = 0xF6;
+			sprinter_dbg[23] = (uint8_t)len;
+			if (len == 0) {
+				sprinter_dbg[15] = 0xF8;
+				sprinter_dbg[23] = 0;
+				sprinter_dbg[15] = 0xFA;
+				cq = vtpend;
+				sprinter_dbg[15] = 0xFB;
+				sprinter_dbg[21] = cq;
+				vtpend = 0;
+				sprinter_dbg[15] = 0xFC;
+				p = &cq;
+				len = 1;
+				sprinter_dbg[15] = 0xFD;
+				sprinter_dbg[22] = len;
+				goto post_loop;
+			}
+			len--;
+			sprinter_dbg[15] = 0xF7;
+			sprinter_dbg[23] = (uint8_t)len;
+#else
 		while (len--) {
+#endif
 			unsigned char c = *p++;
 			if (vtmode == 0) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+				sprinter_exec_fail_stage = 0xA0;
+				sprinter_exec_fail_err = c;
+				sprinter_charout_wrap(c);
+				sprinter_dbg[15] = 0xF2;
+				sprinter_dbg[16] = c;
+#else
 				charout(c);
+#endif
 				continue;
 			}
 			if (vtmode == 1) {
@@ -287,15 +422,44 @@ void vtoutput(unsigned char *p, unsigned int len)
 			}
 		}
 		/* Copy the pending symbol and clear the buffer */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF9;
+#endif
 		cq = vtpend;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF2;
+		sprinter_dbg[21] = cq;
+#endif
 		vtpend = 0;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF3;
+		sprinter_dbg[21] = cq;
+#endif
 		/* Any loops print the single byte in cq */
 		p = &cq;
 		len = 1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF4;
+		sprinter_dbg[22] = len;
+#endif
 		/* Until we don't get interrupted */
 	} while(cq);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+post_loop:
+#endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF5;
+#endif
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xEA;
+	sprinter_dbg[21] = (uint8_t)cursory;
+	sprinter_dbg[22] = (uint8_t)cursorx;
+#endif
 	vt_cursor_on();
 	vtbusy = 0;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xEB;
+#endif
 }
 
 /* Note: multiple vt switching handled by platform wrapper */

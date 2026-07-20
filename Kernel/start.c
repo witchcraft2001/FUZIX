@@ -11,8 +11,97 @@ extern void plt_trace(uint8_t code);
 extern void sprinter_force_bank1(void);
 extern uint8_t spr_boot_count;
 extern uint8_t sprinter_dbg[];
+extern uint8_t spr_initio_stage;
+extern uint16_t spr_initio_fd;
+extern uint16_t spr_initio_err;
+extern uint8_t spr_initio_files[3];
 extern arg_t _open(void);
 extern arg_t _dup(void);
+
+static arg_t sprinter_open_boot_tty(uint16_t flag)
+{
+	int_fast8_t uindex;
+	int_fast8_t oftindex;
+	inoptr ino;
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xC8;
+	sprinter_dbg[16] = (uint8_t)TTYDEV;
+	sprinter_dbg[17] = (uint8_t)(TTYDEV >> 8);
+	sprinter_dbg[18] = (uint8_t)flag;
+	sprinter_dbg[19] = (uint8_t)(flag >> 8);
+	sprinter_dbg[20] = 0xFF;
+	sprinter_dbg[21] = 0xFF;
+	sprinter_dbg[22] = 0xFF;
+	sprinter_dbg[23] = 0xFF;
+#endif
+	if ((uindex = uf_alloc()) == -1)
+		return -1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xC9;
+	sprinter_dbg[20] = (uint8_t)uindex;
+#endif
+	if ((oftindex = oft_alloc()) == -1) {
+		udata.u_files[uindex] = NO_FILE;
+		return -1;
+	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xCA;
+	sprinter_dbg[21] = (uint8_t)oftindex;
+#endif
+	for (ino = i_tab; ino < i_tab + ITABSIZE; ++ino) {
+		if (ino->c_refs == 0)
+			break;
+	}
+	if (ino == i_tab + ITABSIZE) {
+		of_tab[oftindex].o_refs = 0;
+		udata.u_files[uindex] = NO_FILE;
+		udata.u_error = ENFILE;
+		return -1;
+	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xCB;
+	sprinter_dbg[22] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[23] = (uint8_t)(((uarg_t)ino) >> 8);
+#endif
+	memset(ino, 0, sizeof(*ino));
+	ino->c_magic = CMAGIC;
+	/* Char-device inodes must carry the device number in c_dev.
+	 * Using root_dev left c_dev=0 after mount churn and made write(1)
+	 * hit iobad / EINVAL (MAME: iobad ptr=… dev=0000). */
+	ino->c_dev = TTYDEV;
+	ino->c_node.i_mode = F_CDEV | 0666;
+	ino->c_node.i_nlink = 1;
+	ino->c_node.i_addr[0] = TTYDEV;
+	ino->c_refs = 1;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xCC;
+#endif
+	if (d_open(TTYDEV, flag) != 0) {
+		ino->c_refs = 0;
+		of_tab[oftindex].o_refs = 0;
+		udata.u_files[uindex] = NO_FILE;
+		return -1;
+	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xCD;
+	sprinter_dbg[20] = (uint8_t)udata.u_error;
+#endif
+	of_tab[oftindex].o_inode = ino;
+	of_tab[oftindex].o_ptr = 0;
+	of_tab[oftindex].o_access = flag;
+	udata.u_files[uindex] = oftindex;
+	if (O_ACCMODE(flag) != O_RDONLY)
+		ino->c_writers++;
+	if (O_ACCMODE(flag) != O_WRONLY)
+		ino->c_readers++;
+	tty_post(ino, minor(TTYDEV), flag);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xCE;
+#endif
+	return uindex;
+}
+
 void sprinter_bootmark(char c)
 {
 	static uint8_t x;
@@ -20,6 +109,16 @@ void sprinter_bootmark(char c)
 	plot_char(7, x, (uint16_t)c);
 	if (x < 79)
 		x++;
+}
+
+void sprinter_boothex(uint8_t v)
+{
+	uint8_t n;
+
+	n = v >> 4;
+	sprinter_bootmark(n < 10 ? '0' + n : 'A' + (n - 10));
+	n = v & 0x0F;
+	sprinter_bootmark(n < 10 ? '0' + n : 'A' + (n - 10));
 }
 #else
 #define EARLY_TRACE(x) do { } while (0)
@@ -90,18 +189,12 @@ static uaddr_t progptr, old_progptr;
 static uaddr_t argptr, old_argptr;
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-static const uint8_t sprinter_init_path[] = "/init";
-static uint8_t *const sprinter_init_argv[] = {
-	(uint8_t *)sprinter_init_path,
-	NULL
-};
-static uint8_t *const sprinter_init_envp[] = {
-	NULL
-};
+extern uint8_t spr_common_init_path[];
+extern uint8_t *spr_common_init_argv[];
+extern uint8_t *spr_common_init_envp[];
 
 static void sprinter_prepare_init_stdio(void)
 {
-	static const char tty1_path[] = "/dev/tty1";
 	uint8_t old_sysio = udata.u_sysio;
 	uint8_t *old_base = udata.u_base;
 	arg_t old_argn = udata.u_argn;
@@ -109,23 +202,49 @@ static void sprinter_prepare_init_stdio(void)
 	arg_t old_argn2 = udata.u_argn2;
 	arg_t fd;
 
+	spr_initio_stage = 0xC0;
+	spr_initio_fd = 0xFFFF;
+	spr_initio_err = 0;
+	spr_initio_files[0] = udata.u_files[0];
+	spr_initio_files[1] = udata.u_files[1];
+	spr_initio_files[2] = udata.u_files[2];
+
 	udata.u_sysio = 1;
-	udata.u_base = (uint8_t *)tty1_path;
-	udata.u_argn = (arg_t)tty1_path;
-	udata.u_argn1 = O_RDWR;
-	udata.u_argn2 = 0;
-	fd = _open();
+	spr_initio_stage = 0xC1;
+	fd = sprinter_open_boot_tty(O_RDWR);
+	spr_initio_stage = 0xC2;
+	spr_initio_fd = (uint16_t)fd;
+	spr_initio_err = udata.u_error;
+	spr_initio_files[0] = udata.u_files[0];
+	spr_initio_files[1] = udata.u_files[1];
+	spr_initio_files[2] = udata.u_files[2];
+	sprinter_bootmark('j');
 	if ((int16_t)fd >= 0) {
 		udata.u_argn = fd;
+		spr_initio_stage = 0xC3;
 		_dup();
+		spr_initio_stage = 0xC4;
+		spr_initio_err = udata.u_error;
+		spr_initio_files[0] = udata.u_files[0];
+		spr_initio_files[1] = udata.u_files[1];
+		spr_initio_files[2] = udata.u_files[2];
+		sprinter_bootmark('k');
 		udata.u_argn = fd;
+		spr_initio_stage = 0xC5;
 		_dup();
+		spr_initio_stage = 0xC6;
+		spr_initio_err = udata.u_error;
+		spr_initio_files[0] = udata.u_files[0];
+		spr_initio_files[1] = udata.u_files[1];
+		spr_initio_files[2] = udata.u_files[2];
+		sprinter_bootmark('l');
 	}
 	udata.u_sysio = old_sysio;
 	udata.u_base = old_base;
 	udata.u_argn = old_argn;
 	udata.u_argn1 = old_argn1;
 	udata.u_argn2 = old_argn2;
+	spr_initio_stage = 0xCF;
 }
 #endif
 
@@ -241,13 +360,14 @@ void complete_init(void)
 	/*
 	 * Sprinter bring-up: the initial PID1 user-space argv staging still
 	 * traps in add_argument()/uput before the real exec loader starts.
-	 * Hand _execve() kernel-resident "/init", argv[] and envp[] under
-	 * u_sysio so the next failure edge moves into the actual exec path.
+	 * Hand _execve() common-memory-resident "/init", argv[] and envp[]
+	 * under u_sysio so the next failure edge moves into the actual exec
+	 * path without depending on the current code bank mapping.
 	 */
 	udata.u_sysio = 1;
-	udata.u_argn2 = (arg_t)sprinter_init_envp;
-	udata.u_argn = (arg_t)sprinter_init_path;
-	udata.u_argn1 = (arg_t)sprinter_init_argv;
+	udata.u_argn2 = (arg_t)spr_common_init_envp;
+	udata.u_argn = (arg_t)spr_common_init_path;
+	udata.u_argn1 = (arg_t)spr_common_init_argv;
 #else
 	/* Terminate argv, also use this as the env ptr */
 	uputp(0, (void *)argptr);
@@ -483,7 +603,11 @@ void fuzix_main(void)
 	uint16_t tty_open_rc;
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_boot_count++;
-#endif
+	sprinter_dbg[20] = 0xBA;
+	sprinter_dbg[21] = 0x27;
+	sprinter_dbg[22] = 0x04;
+	sprinter_dbg[23] = 0x6C;
+	#endif
 	/* setup state */
 	udata.u_ininterrupt = 0;
 	udata.u_insys = true;
@@ -524,8 +648,12 @@ void fuzix_main(void)
 			"Copyright (c) 2013-2015 Will Sowerbutts <will@sowerbutts.com>\n"
 			"Copyright (c) 2014-2025 Alan Cox <alan@etchedpixels.co.uk>\nDevboot\n",
 			sysinfo.uname);
+	EARLY_TRACE(0x16);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	EARLY_TRACE(0x17);
 	sprinter_bootmark('0');
+	sprinter_bootmark('r');
+	EARLY_TRACE(0x18);
 #endif
 
 	set_cpu_type();
@@ -614,15 +742,37 @@ void fuzix_main(void)
 			EARLY_TRACE(0x3B);
             }
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+		EARLY_TRACE(0xE4);
+		sprinter_dbg[15] = 0xEF;
+		plot_char(6, 0, (uint16_t)'u');
+		EARLY_TRACE(0xE5);
+		plot_char(6, 1, (uint16_t)'F');
+		EARLY_TRACE(0xE6);
 		sprinter_bootmark('F');
+		EARLY_TRACE(0xE7);
+		sprinter_dbg[15] = 0xF0;
+		sprinter_dbg[16] = (uint8_t)root_dev;
+		sprinter_dbg[17] = (uint8_t)(root_dev >> 8);
+		sprinter_dbg[18] = ro;
 #endif
             /* Mount the root device */
 		EARLY_TRACE(0x34);
 		/* Console output disabled while early tty bring-up is unstable. */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		EARLY_TRACE(0xE8);
+		sprinter_dbg[15] = 0xF1;
+#endif
             m = fmount(root_dev, NULLINODE, ro);
 		EARLY_TRACE(0x35);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xF2;
+		sprinter_dbg[16] = (uint8_t)(uarg_t)m;
+		sprinter_dbg[17] = (uint8_t)(((uarg_t)m) >> 8);
+		sprinter_dbg[18] = (uint8_t)udata.u_error;
 		sprinter_bootmark('G');
+		/* Observed: m_fs live but m_dev cleared after fmount/sync. */
+		if (m && m->m_dev == NO_DEVICE)
+			m->m_dev = root_dev;
 #endif
             if (m == NULL) {
 			EARLY_TRACE(0x36);
@@ -634,6 +784,10 @@ void fuzix_main(void)
 			EARLY_TRACE(0x3A);
 			EARLY_TRACE(mount_tries);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+			sprinter_dbg[15] = 0xF7;
+			sprinter_dbg[16] = mount_tries;
+			sprinter_dbg[17] = (uint8_t)udata.u_error;
+			sprinter_dbg[18] = (uint8_t)root_dev;
 			sprinter_bootmark('H');
 #endif
 			if (mount_tries >= 1) {
@@ -678,7 +832,13 @@ void fuzix_main(void)
 	kputs("OK\n");
 
 	/* finish building argv */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('a');
+#endif
 	complete_init();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('b');
+#endif
 	EARLY_TRACE(0xE9);
 	EARLY_TRACE((uint8_t)udata.u_argn);
 	EARLY_TRACE((uint8_t)(((uarg_t)udata.u_argn) >> 8));
@@ -691,7 +851,17 @@ void fuzix_main(void)
 	udata.u_root = i_ref(root);
 	udata.u_ptab->p_time = ticks.full;
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('c');
+	/*
+	 * USERLAND open/exec is past the synthetic-/init edge. Re-enable PID1
+	 * stdio so write(1) from /init can reach the tty. Prefer keeping this
+	 * path until an asm of_tab binder replaces the SDCC store hazard.
+	 */
 	sprinter_prepare_init_stdio();
+	sprinter_bootmark('d');
 #endif
 	exec_or_die();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_bootmark('!');
+#endif
 }

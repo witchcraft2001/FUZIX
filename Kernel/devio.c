@@ -442,20 +442,81 @@ int bdwrite(bufptr bp)
 
 int cdread(uint16_t dev, uint_fast8_t flag)
 {
+	uint_fast8_t maj;
+	uint_fast8_t min;
 	validchk(dev, PANIC_CDR);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	maj = major(dev);
+	min = minor(dev);
+	if (maj == 2)
+		return tty_read(min, 1, flag);
+	if (maj == 0)
+		return td_read(min, 1, flag);
+#endif
 	return ((*dev_tab[major(dev)].dev_read) (minor(dev), 1, flag));
 }
 
 int cdwrite(uint16_t dev, uint_fast8_t flag)
 {
+	uint_fast8_t maj;
+	uint_fast8_t min;
 	validchk(dev, PANIC_CDW);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+	maj = major(dev);
+	min = minor(dev);
 	spr_rw_stage = 0xC3;
 	spr_rw_fd = (uint8_t)flag;
 	spr_rw_base = dev;
 	spr_rw_count = (uint16_t)udata.u_count;
-	spr_rw_access = (uint8_t)major(dev);
-	spr_rw_mode = (uint16_t)minor(dev);
+	spr_rw_access = maj;
+	spr_rw_mode = (uint16_t)min;
+	if (maj == 2) {
+		spr_rw_stage = 0xC4;
+		/*
+		 * Bring-up: skip tty_write()/vtoutput().  vtoutput lives in
+		 * VIDEO/CODE3; after a successful write MAME still had
+		 * WIN1/2 stuck on 0x4E/0x4F, then RST38@00C4 / iobad on
+		 * the syscall return path.  kputchar() under EARLY_TRACE
+		 * uses plot_char in WIN0 (sprvideo), so CODE1 stays mapped.
+		 */
+		{
+			uint8_t *p = udata.u_base;
+			usize_t n = udata.u_count;
+
+			used(min);
+			used(flag);
+			udata.u_done = 0;
+			while (udata.u_done < n) {
+				int ch;
+
+				if (udata.u_sysio)
+					ch = *p;
+				else {
+					ch = ugetc(p);
+					if (ch < 0)
+						break;
+				}
+				kputchar((uint_fast8_t)ch);
+				p++;
+				udata.u_base = p;
+				udata.u_done++;
+			}
+			/*
+			 * Do not call sprinter_force_bank1() here: remapping
+			 * WIN1/WIN2 under a live banked PC has wiped the
+			 * kernel on this port.  plot_char/kputchar already
+			 * run without it for the sprinit write path.
+			 */
+			spr_rw_stage = 0xC7;
+			udata.u_error = 0;
+			return (int)udata.u_done;
+		}
+	}
+	if (maj == 0) {
+		spr_rw_stage = 0xC5;
+		return td_write(min, 1, flag);
+	}
+	spr_rw_stage = 0xC6;
 #endif
 	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 1, flag));
 }
@@ -464,8 +525,10 @@ int d_open(uint16_t dev, uint_fast8_t flag)
 {
 	uint_fast8_t maj;
 	uint_fast8_t min;
+#ifndef CONFIG_SPRINTER_EARLY_TRACE
 	struct devsw *dp;
 	int (*fn)(uint_fast8_t minor, uint16_t flag);
+#endif
 
 	if (!validdev(dev)) {
 	        udata.u_error = ENXIO;
@@ -475,39 +538,43 @@ int d_open(uint16_t dev, uint_fast8_t flag)
 	min = minor(dev);
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	if (maj == 2) {
-		fn = tty_open;
 		sprinter_dbg[9] = 0xDB;
 		sprinter_dbg[4] = min;
 		sprinter_dbg[5] = maj;
-		sprinter_dbg[6] = (uint8_t)(uaddr_t)fn;
-		sprinter_dbg[7] = (uint8_t)(((uaddr_t)fn) >> 8);
+		sprinter_dbg[6] = (uint8_t)(uaddr_t)tty_open;
+		sprinter_dbg[7] = (uint8_t)(((uaddr_t)tty_open) >> 8);
 		sprinter_dbg[8] = 0xD0;
-		dev = fn(min, flag);
+		dev = tty_open(min, flag);
 		sprinter_dbg[8] = 0xD1;
 		return dev;
 	}
-#endif
+
+	/* Early bring-up: avoid indirect dev_tab dispatch entirely. */
+	if (maj <= 4) {
+		sprinter_dbg[9] = 0xD2;
+		sprinter_dbg[4] = min;
+		sprinter_dbg[5] = maj;
+		sprinter_dbg[6] = 0;
+		sprinter_dbg[7] = 0;
+		sprinter_dbg[8] = 0xD3;
+		return dev;
+	}
+
+	sprinter_dbg[8] = 0xDE;
+	sprinter_dbg[6] = (uint8_t)maj;
+	sprinter_dbg[7] = 0;
+	udata.u_error = ENXIO;
+	return -1;
+#else
 	dp = &dev_tab[maj];
 	fn = dp->dev_open;
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	if (maj == 2 && DIO_PTR16(fn) < 0x4000) {
-		sprinter_dbg[9] = 0xDA;
-		sprinter_restore_devsw();
-		dp = &dev_tab[maj];
-		fn = dp->dev_open;
-	} else
-		sprinter_dbg[9] = 0x00;
-	sprinter_dbg[4] = (uint8_t)dev;
-	sprinter_dbg[5] = maj;
-	sprinter_dbg[6] = (uint8_t)(uaddr_t)fn;
-	sprinter_dbg[7] = (uint8_t)(((uaddr_t)fn) >> 8);
-	sprinter_dbg[8] = 0xD0;
-#endif
+	if (DIO_PTR16(fn) < 0x4000) {
+		udata.u_error = ENXIO;
+		return -1;
+	}
 	dev = fn(min, flag);
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[8] = 0xD1;
-#endif
 	return dev;
+#endif
 }
 
 int d_close(uint16_t dev)
@@ -800,25 +867,63 @@ void kputnum(int v)
 void kprintf(const char *fmt, ...)
 {
 	va_list ap;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	uint8_t n = 0;
+#endif
 
 	va_start(ap, fmt);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xD3;
+	sprinter_dbg[16] = 0;
+	sprinter_dbg[17] = fmt[0];
+	sprinter_dbg[18] = fmt[1];
+	sprinter_dbg[19] = 0;
+	sprinter_dbg[20] = 0;
+	sprinter_dbg[21] = 0;
+	sprinter_dbg[22] = 0;
+	sprinter_dbg[23] = 0;
+#endif
 	while (*fmt) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[16] = n;
+		sprinter_dbg[17] = *fmt;
+#endif
 		if (*fmt == '%') {
 			fmt++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			sprinter_dbg[15] = 0xD6;
+			sprinter_dbg[19] = *fmt;
+#endif
 			switch (*fmt) {
 				case 's':
 				{
 					char* str = va_arg(ap, char *);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD7;
+					sprinter_dbg[20] = str ? str[0] : 0;
+#endif
 					kputs(str);
 					fmt++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD8;
+					n++;
+#endif
 					continue;
 				}
 
 				case 'c':
 				{
 					char c = va_arg(ap, int);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD4;
+					sprinter_dbg[18] = c;
+#endif
 					kputchar(c);
 					fmt++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD5;
+					n++;
+#endif
 					continue;
 				}
 #ifdef CONFIG_32BIT
@@ -838,8 +943,16 @@ void kprintf(const char *fmt, ...)
 				case '2': /* assume an x is following */
 				{
 					char c = va_arg(ap, int);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD9;
+					sprinter_dbg[18] = c;
+#endif
 					kputhexbyte(c);
 					fmt += 2;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xDA;
+					n++;
+#endif
 					continue;
 				}
 
@@ -851,6 +964,11 @@ void kprintf(const char *fmt, ...)
 				case 'u':
 				{
 					unsigned int v = va_arg(ap, int);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xD9;
+					sprinter_dbg[20] = (uint8_t)v;
+					sprinter_dbg[21] = (uint8_t)(v >> 8);
+#endif
 
 					if (*fmt == 'x' || *fmt == 'p')
 						kputhex(v);
@@ -860,12 +978,24 @@ void kprintf(const char *fmt, ...)
 						kputunum(v);
 
 					fmt++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					sprinter_dbg[15] = 0xDA;
+					n++;
+#endif
 					continue;
 				}
 			}
 		}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xD4;
+		sprinter_dbg[18] = *fmt;
+#endif
 		kputchar(*fmt);
 		fmt++;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		sprinter_dbg[15] = 0xD5;
+		n++;
+#endif
 	}
 
 	va_end(ap);

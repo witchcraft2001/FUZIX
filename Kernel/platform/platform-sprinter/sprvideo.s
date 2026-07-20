@@ -31,6 +31,7 @@
         .globl _vtattr_notify
         .globl _vtattr_cap
         .globl mpgsel_cache
+        .globl _sprinter_dbg
 
         .include "kernel.def"
 
@@ -401,22 +402,37 @@ _cursor_on:
         push de
         push hl
         push iy
+        ld a, #0xEC
+        ld (_sprinter_dbg + 15), a
+        ld a, e
+        ld (_sprinter_dbg + 21), a
+        ld a, d
+        ld (_sprinter_dbg + 22), a
         ; Save cursor position (H=x, L=y -> stored as 16-bit HL)
         ld h, d
         ld l, e
         ld (cursorpos), hl
 
         call map_vr
+        ld a, #0xED
+        ld (_sprinter_dbg + 15), a
         ; Reload D=x, E=y for cell_hl (HL was overwritten by ld (cursorpos),hl)
         ld hl, (cursorpos)
         ld d, h
         ld e, l
         call cell_hl
+        ld a, #0xEE
+        ld (_sprinter_dbg + 15), a
         inc hl			; point to attribute byte
         ld a, (hl)
         xor #0xFF		; invert attribute
         ld (hl), a
-        jp unmap_vr
+        ld a, #0xEF
+        ld (_sprinter_dbg + 15), a
+        call unmap_vr
+        ld a, #0xF0
+        ld (_sprinter_dbg + 15), a
+        ret
 
 ;----------------------------------------------------------------------
 ; _cursor_off / _cursor_disable
@@ -455,6 +471,11 @@ beep_loop:
         jr nz, beep_loop
         ret
 
+;
+; On Sprinter _DATA lives in WIN0 (s__DATA ~0x0FEA), which map_vr never
+; remaps.  Do not put these in _COMMONDATA (overcrowded / aliased) or in
+; the middle of _CODE (shifts the CODE layout and broke /init open).
+;
         .area _DATA
 cursorpos:
         .dw 0

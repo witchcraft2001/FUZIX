@@ -44,6 +44,19 @@ arg_t _open(void)
 	int w;
 	int j;
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (udata.u_sysio) {
+		sprinter_dbg[15] = 0xB5;
+		sprinter_dbg[16] = (uint8_t)(uarg_t)name;
+		sprinter_dbg[17] = (uint8_t)(((uarg_t)name) >> 8);
+		sprinter_dbg[18] = (uint8_t)flag;
+		sprinter_dbg[19] = (uint8_t)(flag >> 8);
+		sprinter_dbg[20] = 0xFF;
+		sprinter_dbg[21] = 0xFF;
+		sprinter_dbg[22] = 0;
+		sprinter_dbg[23] = 0;
+	}
+#endif
 	parent = NULLINODE;
 
 	r = (flag + 1) & 1;
@@ -55,11 +68,35 @@ arg_t _open(void)
 	}
 	if ((uindex = uf_alloc()) == -1)
 		return (-1);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (udata.u_sysio) {
+		sprinter_dbg[15] = 0xB6;
+		sprinter_dbg[20] = (uint8_t)uindex;
+		sprinter_dbg[21] = (uint8_t)udata.u_error;
+	}
+#endif
 
 	if ((oftindex = oft_alloc()) == -1)
 		goto nooft;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (udata.u_sysio) {
+		sprinter_dbg[15] = 0xB7;
+		sprinter_dbg[22] = (uint8_t)oftindex;
+		sprinter_dbg[23] = (uint8_t)udata.u_error;
+	}
+#endif
 
 	ino = n_open_lock(name, &parent);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	if (udata.u_sysio) {
+		sprinter_dbg[15] = 0xB8;
+		sprinter_dbg[16] = (uint8_t)(uarg_t)ino;
+		sprinter_dbg[17] = (uint8_t)(((uarg_t)ino) >> 8);
+		sprinter_dbg[18] = (uint8_t)(uarg_t)parent;
+		sprinter_dbg[19] = (uint8_t)(((uarg_t)parent) >> 8);
+		sprinter_dbg[21] = (uint8_t)udata.u_error;
+	}
+#endif
 	if (ino) {
 		/* We hold a reference to the found inode. but we don't need
 		   one to the parent as we have nothing to create */
@@ -130,6 +167,15 @@ arg_t _open(void)
 	 */
 	if (isdevice(ino)) {
 		inoptr *iptr = &of_tab[oftindex].o_inode;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		if (udata.u_sysio) {
+			sprinter_dbg[15] = 0xB9;
+			sprinter_dbg[16] = (uint8_t)ino->c_node.i_addr[0];
+			sprinter_dbg[17] = (uint8_t)(ino->c_node.i_addr[0] >> 8);
+			sprinter_dbg[18] = (uint8_t)ino->c_dev;
+			sprinter_dbg[19] = (uint8_t)(ino->c_dev >> 8);
+		}
+#endif
 		/* d_open may block and thus ino may become invalid as may
 		   parent (but we don't need it again). It may also be changed
 		   by the call to dev_openi. /dev/tty in particular does this
@@ -142,6 +188,13 @@ arg_t _open(void)
 		   usage or just because we blocked */
 		ino = *iptr;
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+		if (udata.u_sysio) {
+			sprinter_dbg[15] = 0xBA;
+			sprinter_dbg[16] = (uint8_t)(uarg_t)ino;
+			sprinter_dbg[17] = (uint8_t)(((uarg_t)ino) >> 8);
+			sprinter_dbg[18] = (uint8_t)udata.u_error;
+			sprinter_dbg[19] = (uint8_t)spr_rw_stage;
+		}
 		spr_rdwr_stage = 0xB0;
 		spr_rdwr_reading = (uint8_t)flag;
 		spr_rdwr_fd = (uint8_t)oftindex;

@@ -73,18 +73,17 @@ image: mbr.bin boot.bin
 	#   common.bin  0x0000-0x3FFF = page 0 (CODE/WIN0)
 	#               0xC000-0xFFFF = page 3 (COMMONMEM/WIN3)
 	#   bank1.bin   0x4000-0x7FFF = page 1, 0x8000-0xBFFF = page 2 (CODE1)
-	#   bank2.bin   0x4000-0x7FFF = page 4 (CODE2; page 5 is empty)
-	#   bank3.bin   0x4000-0x7FFF = page 6 (CODE3; page 7 is empty)
-	# Pages 5 and 7 must be present as zero-filled pages to keep hardware
-	# page numbers aligned with image page offsets (boot.s maps image page N
-	# to physical page KERN_PAGE_BASE+N).
+	#   bank2.bin   0x4000-0x7FFF = page 4, 0x8000-0xBFFF = page 5 (CODE2)
+	#   bank3.bin   0x4000-0x7FFF = page 6, 0x8000-0xBFFF = page 7 (CODE3)
+	# CODE2/CODE3 both spill past 0x8000; pages 5 and 7 must carry the
+	# high halves (zero-filling them made PC fall through NOP slides when
+	# exec crossed into WIN2).  boot.s maps image page N to physical
+	# KERN_PAGE_BASE+N.
 	dd if=../../common.bin bs=16384 count=1 conv=sync > fuzix.sprinter
 	dd if=../../bank1.bin  bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
 	dd if=../../common.bin bs=16384 skip=3 count=1 conv=sync >> fuzix.sprinter
-	dd if=../../bank2.bin  bs=16384 skip=1 count=1 conv=sync >> fuzix.sprinter
-	dd if=/dev/zero        bs=16384        count=1            >> fuzix.sprinter
-	dd if=../../bank3.bin  bs=16384 skip=1 count=1 conv=sync >> fuzix.sprinter
-	dd if=/dev/zero        bs=16384        count=1            >> fuzix.sprinter
+	dd if=../../bank2.bin  bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
+	dd if=../../bank3.bin  bs=16384 skip=1 count=2 conv=sync >> fuzix.sprinter
 
 diskimage: image
 	mkdir -p $(IMAGES)

@@ -26,6 +26,41 @@
 #include <vt.h>
 #include <devtty.h>
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+extern uint8_t sprinter_dbg[];
+
+static uint8_t sprinter_kcx;
+static uint8_t sprinter_kcy;
+
+static void sprinter_early_kputc(uint_fast8_t c)
+{
+	if (c == '\r')
+		return;
+	if (c == '\n') {
+		sprinter_kcx = 0;
+		if (sprinter_kcy < VT_BOTTOM)
+			sprinter_kcy++;
+		else {
+			scroll_up();
+			clear_lines(VT_BOTTOM, 1);
+		}
+		return;
+	}
+	plot_char((int8_t)sprinter_kcy, (int8_t)sprinter_kcx, c);
+	if (sprinter_kcx < VT_RIGHT)
+		sprinter_kcx++;
+	else {
+		sprinter_kcx = 0;
+		if (sprinter_kcy < VT_BOTTOM)
+			sprinter_kcy++;
+		else {
+			scroll_up();
+			clear_lines(VT_BOTTOM, 1);
+		}
+	}
+}
+#endif
+
 __sfr __at 0x18 sio_data_a;
 __sfr __at 0x19 sio_ctrl_a;
 
@@ -279,8 +314,19 @@ void kbd_poll(void)
 
 void tty_putc(uint_fast8_t minor, uint_fast8_t c)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE0;
+	sprinter_dbg[16] = (uint8_t)minor;
+	sprinter_dbg[17] = c;
+#endif
 	minor;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE1;
+#endif
 	vtoutput(&c, 1);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xE2;
+#endif
 }
 
 uint_fast8_t tty_writeready(uint_fast8_t minor)
@@ -354,6 +400,13 @@ void tty_data_consumed(uint_fast8_t minor)
 
 void kputchar(uint_fast8_t c)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	sprinter_dbg[15] = 0xDF;
+	sprinter_dbg[16] = c;
+	sprinter_early_kputc(c);
+	sprinter_dbg[15] = 0xE3;
+	return;
+#endif
 	if (c == '\n')
 		tty_putc(1, '\r');
 	tty_putc(1, c);

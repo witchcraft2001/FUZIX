@@ -5,8 +5,8 @@ package platform-sprinter
 disable-pkg platform-sprinter
 
 # Temporary bring-up override: boot into a tiny Sprinter-only userspace probe
-# instead of the full SysV-style /init. Current probe is a tiny C binary that
-# performs one minimal syscall and then loops, used to validate the first
-# user->kernel->user round-trip without dragging in full init/stdio logic.
+# instead of the full SysV-style /init.
+# sprinit_raw is linked at PROGLOAD (a_base=1) so absolute labels do not
+# smash the low-page vectors (the old 0x0000-base build wrote into 0x00xx).
 r /init
-f 0755 /init          ../../../Applications/util/sprinit
+f 0755 /init          ../../../Applications/util/sprinit_raw

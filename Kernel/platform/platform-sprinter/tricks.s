@@ -23,28 +23,43 @@ MAP_BANK1	.equ	0x4A49
 	.globl top_bank
 	.globl _int_disabled
 	.globl _udata
-	.globl _kernel_pages
-	.globl mpgsel_cache
-	.globl map_kernel_restore
-	.globl _get_common
-	.globl _swap_finish
-	.globl _spr_dofork_count
-	.globl _spr_dofork_ret
-	.globl _spr_dofork_child
-	.globl _spr_dofork_upages
-	.globl _spr_dofork_cpages
-	.globl _spr_dofork_iter
-	.globl _spr_dofork_child_page
-	.globl _spr_dofork_parent_page
-
-        ; imported debug symbols
-        .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
+		.globl _kernel_pages
+		.globl mpgsel_cache
+		.globl map_kernel_restore
+		.globl _get_common
+		.globl _swap_finish
+		.globl _spr_switchin_stage
+		.globl _spr_switchin_sp
+		.globl _spr_switchin_ret
+		.globl _spr_switchin_next
+		.globl _spr_switchin_rc
+		.globl _spr_switchin_ptab
+	        ; imported debug symbols
+	        .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
 
         .area _COMMONMEM
 
 ; ramtop must be in common
 _need_resched:
 	.db 0
+
+_spr_switchin_stage:
+	.db 0
+
+_spr_switchin_sp:
+	.dw 0
+
+_spr_switchin_ret:
+	.dw 0
+
+_spr_switchin_next:
+	.dw 0
+
+_spr_switchin_rc:
+	.dw 0
+
+_spr_switchin_ptab:
+	.dw 0
 
 _plt_switchout:
         ; save machine state
@@ -164,6 +179,7 @@ notswapped:
 	sbc hl, de
 	jr nz, switchinfail
 switchin_resume:
+	ld (_spr_switchin_ptab), de
 
 	ld hl, #P_TAB__P_STATUS_OFFSET
 	add hl, de
@@ -208,6 +224,42 @@ kpages_ok:
 	call map_kernel_restore
 
 	pop hl ; return code
+	ld (_spr_switchin_rc), hl
+
+	; Capture the immediate return frame before leaving _switchin.
+	; If the target is 0xC000, stop here to preserve the pre-RST frame.
+	push hl
+	push de
+	push bc
+	ld hl, #6
+	add hl, sp
+	ld (_spr_switchin_sp), hl
+	ld e, (hl)
+	inc hl
+	ld d, (hl)
+	ld (_spr_switchin_ret), de
+	inc hl
+	ld c, (hl)
+	inc hl
+	ld b, (hl)
+	ld (_spr_switchin_next), bc
+	ld a, #0xE1
+	ld (_spr_switchin_stage), a
+	ld a, d
+	cp #0xC0
+	jr nz, sw_ret_ok
+	ld a, e
+	or a
+	jr nz, sw_ret_ok
+	ld a, #0xE0
+	ld (_spr_switchin_stage), a
+sw_ret_c000_hang:
+	halt
+	jr sw_ret_c000_hang
+sw_ret_ok:
+	pop bc
+	pop de
+	pop hl
 
 	; Sprinter bring-up: keep IRQs disabled on return to task context.
 	; Current IM2 sources still storm continuously and trap execution in
@@ -221,7 +273,7 @@ switchinfail:
 	; resync it to the process being switched in and continue
 	; instead of halting in monitor with user pages still mapped.
 	ld (_udata + U_DATA__U_PTAB), de
-	jr switchin_resume
+	jp switchin_resume
 
 fork_proc_ptr: .dw 0
 
@@ -239,32 +291,10 @@ _dofork:
         push de
 	push bc
 
-        ld (fork_proc_ptr), hl
-	push hl
-	push de
-	ld hl, #_spr_dofork_count
-	inc (hl)
-	ld hl, #_spr_dofork_ret
-	pop de
-	ld (hl), e
-	inc hl
-	ld (hl), d
-	pop hl
-	ld (_spr_dofork_child), hl
-	push hl
-	ld de, #P_TAB__P_PAGE_OFFSET
-	add hl, de
-	ld de, #_spr_dofork_cpages
-	ld bc, #4
-	ldir
-	ld hl, #_udata + U_DATA__U_PAGE
-	ld de, #_spr_dofork_upages
-	ld bc, #4
-	ldir
-	ld hl, (_spr_dofork_child)
+	        ld (fork_proc_ptr), hl
 
-        ; prepare return value in parent process -- HL = p->p_pid;
-        ld de, #P_TAB__P_PID_OFFSET
+	        ; prepare return value in parent process -- HL = p->p_pid;
+	        ld de, #P_TAB__P_PID_OFFSET
         add hl, de
         ld a, (hl)
         inc hl
@@ -330,30 +360,27 @@ fork_copy:
 	ld de, #_udata + U_DATA__U_PAGE
 	; and de is the parent
 fork_next:
-	ld a, b
-	ld (_spr_dofork_iter), a
-	ld a, (hl)
-	cp #0x08
-	jr c, fork_next_child_bad
+		ld a, b
+		ld a, (hl)
+		cp #0x08
+		jr c, fork_next_child_bad
 	cp #0x50
 	jr c, fork_next_child_ok
 fork_next_child_bad:
-	ld a, #0x49
+		ld a, #0x49
 fork_next_child_ok:
-	ld (_spr_dofork_child_page), a
-	out (MPGSEL_1), a	; 0x4000 map the child
-	ld c, a
-	inc hl
+		out (MPGSEL_1), a	; 0x4000 map the child
+		ld c, a
+		inc hl
 	ld a, (de)
 	cp #0x08
 	jr c, fork_next_parent_bad
 	cp #0x50
 	jr c, fork_next_parent_ok
 fork_next_parent_bad:
-	ld a, #0x4A
+		ld a, #0x4A
 fork_next_parent_ok:
-	ld (_spr_dofork_parent_page), a
-	out (MPGSEL_2), a	; 0x8000 maps the parent
+		out (MPGSEL_2), a	; 0x8000 maps the parent
 	inc de
 	exx
 	ld hl, #0x8000		; copy the bank

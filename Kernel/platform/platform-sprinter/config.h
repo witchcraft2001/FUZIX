@@ -67,6 +67,7 @@ extern uint16_t swap_dev;
 #define BOOTDEVICENAMES "hd#"
 
 #define NBUFS    5        /* Number of block buffers - must match kernel.def */
+#define CONFIG_DYNAMIC_BUFPOOL
 #define NMOUNTS	 4	  /* Number of mounts at a time */
 
 #define MAX_BLKDEV 2	    /* IDE only for now */

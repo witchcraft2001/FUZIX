@@ -127,7 +127,13 @@ int tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 	spr_rw_access = (uint8_t)flag;
 #endif
 
-	if (!valaddr_r(udata.u_base, udata.u_count))
+	/*
+	 * u_sysio buffers live in kernel space (e.g. Sprinter early-trace
+	 * bounce onto the kstack).  valaddr_r() rejects anything above
+	 * u_top, so skip it for system I/O.  Core fix: tty_write already
+	 * honours u_sysio in the char loop; the entry check must too.
+	 */
+	if (!udata.u_sysio && !valaddr_r(udata.u_base, udata.u_count))
 		return -1;
 
 	t = &ttydata[minor];
