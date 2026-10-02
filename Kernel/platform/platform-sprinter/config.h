@@ -33,9 +33,11 @@
  *   0x48 = WIN0 (CODE), 0x49-0x4A = bank1, 0x4B = common,
  *   0x4C-0x4D = bank2, 0x4E-0x4F = bank3
  * Skip VRAM pages 0x50-0x5F.
- * User pages: 8-71 (0x08-0x47) = 64 user pages.
+ * Reserve 0x40-0x47 for firmware: 0x40 contains the live DCP table,
+ * 0x41 the BIOS RAM workspace. Never let a fork overwrite port decoding.
+ * User pages: 0x08-0x3F = 56 user pages.
  */
-#define MAX_MAPS	64
+#define MAX_MAPS	56
 /* Banked kernel */
 #define CONFIG_BANKED
 /* Banks as reported to user space */
@@ -46,7 +48,8 @@
 #define TICKSPERSEC 50	    /* 50 Hz CTC interrupt */
 #define PROGBASE    0x0000  /* also data base */
 #define PROGLOAD    0x0100  /* also data base */
-#define PROGTOP     0xEE00  /* Top of program, base of U_DATA copy */
+/* Keep the upper 8K of WIN3 for IM2, udata and kernel common. */
+#define PROGTOP     0xE000
 
 #define SWAPDEV     (swap_dev)
 extern uint16_t swap_dev;

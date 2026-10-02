@@ -206,21 +206,6 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
 	extern void spr_map_win0_k(void);
 	spr_map_win0_k();
     }
-    /*
-     * After /bin/sh, directory walks still end in switchout →
-     * plt_monitor / i_open(garbage).  Key off spr_doexec_count (2nd+
-     * exec), not p_pid: init often execve's sh without fork so PID stays 1.
-     * Do not read bringup_noei from CODE3 — that previously regressed
-     * /init into validchk(FFFF) on write.  Kernel u_sysio opens OK.
-     */
-    {
-	extern uint8_t spr_doexec_count;
-
-	if (udata.u_ptab && !udata.u_sysio && spr_doexec_count >= 2) {
-		udata.u_error = ENOENT;
-		return NULLINODE;
-	}
-    }
 #endif
 
     /*

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare MAME user text with the original relocatable FUZIX Z80 binary."""
+"""Compare a MAME user image with the original relocatable FUZIX Z80 binary."""
 import argparse
 from pathlib import Path
 
@@ -8,6 +8,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", type=Path)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--map", type=Path,
+                        help="linker map: compare code only, excluding mutable initialized data")
     args = parser.parse_args()
     live = args.snapshot.read_bytes()
     source = args.binary.read_bytes()
@@ -44,9 +46,19 @@ def main():
     for pos in range(base + entry, text_end - 3):
         if expected[pos:pos + 4] == bytes.fromhex("CD 00 00 D0"):
             expected[pos + 1:pos + 3] = base.to_bytes(2, "little")
-    bad = [pos for pos in range(base + entry, text_end)
+    limit = text_end
+    label = "loaded image"
+    if args.map:
+        data = [int(fields[0], 16) + base
+                for line in args.map.read_text().splitlines()
+                if len(fields := line.split()) == 3 and fields[2] == "__data"]
+        if len(data) != 1 or not base + entry < data[0] <= text_end:
+            parser.error("map must define __data within the loaded image")
+        limit = data[0]
+        label = "code"
+    bad = [pos for pos in range(base + entry, limit)
            if expected[pos] != live[pos]]
-    print(f"{sites} relocation sites; text {base + entry:04X}..{text_end - 1:04X}; "
+    print(f"{sites} relocation sites; {label} {base + entry:04X}..{limit - 1:04X}; "
           f"{len(bad)} differing bytes")
     if bad:
         print("First differences (address: expected -> actual):")

@@ -3,7 +3,7 @@ CSRCS = devices.c main.c ide.c
 DISCARD_CSRCS = discard.c
 DISCARD_DSRCS = ../../dev/tinyide_discard.c
 DSRCS = ../../dev/tinyide.c ../../dev/tinydisk_discard.c ../../dev/tinydisk.c
-C3SRCS = devtty.c
+C3SRCS = devtty.c maplimit.c
 # Bounce shares CODE3 with __execve: direct call, no bank stub.
 C4SRCS = execbounce.c
 
@@ -131,6 +131,7 @@ devtty.c: ../../include/kernel.h ../../include/kdata.h ../../include/printf.h ..
 discard.c: ../../include/kernel.h ../../include/kdata.h ../../include/printf.h devtty.h ../../dev/tinyide.h ../../dev/tinydisk.h
 ide.c: ../../include/kernel.h ../../dev/tinydisk.h ../../dev/tinyide.h ../../include/printf.h plt_ide.h
 main.c: ../../include/kernel.h ../../include/kdata.h ../../include/printf.h ../../include/timer.h devtty.h ../../dev/tinydisk.h
+maplimit.c: ../../include/kernel.h ../../include/kdata.h ../../include/exec.h
 
 ../../include/kernel.h: config.h
 ../../dev/tinyide.h: plt_ide.h

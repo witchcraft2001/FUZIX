@@ -19,6 +19,7 @@ MAP_BANK1	.equ	0x4A49
         .globl unix_syscall_entry
         .globl interrupt_handler
 	.globl map_kernel
+	.globl _spr_seed_top
 	.globl _need_resched
 	.globl top_bank
 	.globl _int_disabled
@@ -114,6 +115,7 @@ sw_chk_3:
 sw_no_bank:
 	ld b, h		; HL was actually the return address from a direct C call
 	ld c, l
+	pop af		; SDCC noopt slot precedes the process argument
 	pop de		; new process pointer
 	ld hl, (_kernel_pages + 1)
 	jr sw_stack_ready
@@ -171,6 +173,7 @@ notswapped:
 	ld a, (hl)
 	out (TOP_PORT), a	; *CAUTION* our stack just left the building
 	ld (top_bank), a
+	ld (mpgsel_cache + 3), a
 
 	; ------- No stack -------
         ; check u_data->u_ptab matches what we wanted
@@ -310,6 +313,16 @@ _dofork:
 
         ld (_udata + U_DATA__U_SP), sp
 
+	; PID1 bring-up leaves its allocated common page unseeded while
+	; running on 4B. Move the live stack/code onto that owned page so
+	; both fork_copy and a later parent switch-in use the saved frame.
+	ld a, (mpgsel_cache + 3)
+	ld c, a
+	ld a, (_udata + U_DATA__U_PAGE + 3)
+	cp c
+	jr z, fork_top_ready
+	call _spr_seed_top
+fork_top_ready:
 	; --------- we switch stack copies in this call -----------
 	call fork_copy
 
@@ -342,9 +355,12 @@ _dofork:
 
 	.globl mpgsel_cache
 
+; WIN1=A child, WIN2=A parent; WIN3=A child common after the last LDIR.
+; Runs from common with a common stack; caller has disabled IRQs.
 fork_copy:
 	ld hl, (_udata + U_DATA__U_TOP)
-	ld de, #0x0fff
+	; Match bank16k maps_needed: PROGTOP=E000 reserves an 8K common tail.
+	ld de, #0x1fff
 	add hl, de
 	ld a, h
 	rlca
@@ -391,9 +407,10 @@ fork_next_parent_ok:
 	call map_kernel		; put the maps back
 	djnz fork_next
 	ld a, c
-	ld (mpgsel_cache+3), a
 	out (MPGSEL_3), a	; our last bank repeats up to common
 	; --- we are now on the stack copy ---
+	ld (mpgsel_cache+3), a
+	ld (top_bank), a
 	ret
 
 	.ds 256

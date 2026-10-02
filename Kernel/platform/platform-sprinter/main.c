@@ -83,6 +83,18 @@ void plt_discard(void)
 }
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+arg_t spr_boot_open(void)
+{
+	extern arg_t _open(void);
+	extern uint8_t spr_tty_path[];
+
+	udata.u_error = 0;
+	udata.u_argn = (uarg_t)spr_tty_path;
+	udata.u_argn1 = O_RDWR;
+	udata.u_argn2 = 0;
+	return _open();
+}
+
 /*
  * Rewrite unrelocatable libc `CD 00 00 D0` (call 0; ret nc) to
  * `CD 00 01 D0` (call PROGLOAD/sys_stubs).  Run before doexec via uget

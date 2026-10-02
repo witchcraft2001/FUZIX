@@ -1,6 +1,7 @@
 -- Read-only runtime trace. Resolve symbols from this build, never remap RAM.
 local root = os.getenv("FUZIX_ROOT") or "."
 local out = os.getenv("FUZIX_MAME_OUT") or root .. "/Images/sprinter/mame_out"
+local stop_time = tonumber(os.getenv("FUZIX_MAME_STOP")) or 25
 local symbols = {}
 for line in io.lines(root .. "/Kernel/fuzix.map") do
     local addr, name = line:match("^%s+([%x]+)%s+([_%w]+)%s+")
@@ -23,13 +24,18 @@ for name, index in pairs(manager.machine.devices[":ram"].items) do
     if name:match("m_pointer$") then ram = emu.item(index) end
 end
 assert(ram, "Sprinter RAM save item not found")
+local hw
+for name, index in pairs(manager.machine.devices[":"].items) do
+    if name:match("/m_pages$") then hw = emu.item(index) end
+end
+assert(hw and hw.count == 4, "Sprinter hardware map save item not found")
+local function page(i) return hw:read(i) & 0xFF end
 local pages
 -- Address-space reads invoke Sprinter wait/accelerator handlers, even from
--- Lua. Common/stack RAM stays on page 4B; MPGSEL cache lives there too.
+-- Lua. Read the hardware map directly so fork's stack switch is visible.
 local function rb(a)
     a = a & 0xFFFF
-    local page = a >= 0xC000 and 0x4B or ram:read(0x4B * 0x4000 + (mp & 0x3FFF) + (a >> 14))
-    return ram:read(page * 0x4000 + (a & 0x3FFF))
+    return ram:read(page(a >> 14) * 0x4000 + (a & 0x3FFF))
 end
 local function rw(a) return rb(a) + 256 * rb(a + 1) end
 local function bytes(a, n)
@@ -72,13 +78,26 @@ local function trace_write(addr, data)
 end
 emu.register_frame(function()
     local t = manager.machine.time:as_double()
-    if t >= 7 and not tap then
+    if t >= 5 and not tap then
         -- Sprinter's Z84C015 adds bit 16 for normal memory cycles.
         tap = mem:install_write_tap(0x10000 + ud + 2, 0x10000 + ud + 13, "runtime", trace_write)
+    end
+    if not exec_tap then
         exec_tap = mem:install_write_tap(0x10000 + dex, 0x10000 + dex, "exec-entry", function(addr, data)
-            if data == 2 then
-                save_user(out .. "/runtime-entry.bin", {rb(ud + 2), rb(ud + 3), rb(ud + 4), rb(mp + 3)})
-                f:write("snapshot saved before second doexec enters userspace\n")
+            -- Install before /init, but ignore BIOS/BSS writes to this address.
+            if data >= 1 and cpu.state.PC.value >= 0xF000 and
+                rb(ud + 2) >= 8 and rb(ud + 2) < 0x40 then
+                local map = {rb(ud + 2), rb(ud + 3), rb(ud + 4), page(3)}
+                save_user(string.format("%s/runtime-exec-%02d.bin", out, data), map)
+                local proc = rw(ud)
+                local pid = ram:read(0x48 * 0x4000 + proc + 3) +
+                    256 * ram:read(0x48 * 0x4000 + proc + 4)
+                save_user(string.format("%s/runtime-exec-%02d-pid-%03d.bin", out, data, pid), map)
+                local kernel = assert(io.open(string.format("%s/runtime-kernel-%02d.bin", out, data), "wb"))
+                kernel:write(ram:read_block(0x48 * 0x4000, 0x4000))
+                kernel:close()
+                if data == 2 then save_user(out .. "/runtime-entry.bin", map) end
+                f:write(string.format("snapshot saved before doexec %d enters userspace, pid=%d\n", data, pid))
                 f:flush()
             end
         end)
@@ -87,14 +106,21 @@ emu.register_frame(function()
     local st = cpu.state
     local valid = true
     for i = 0, 2 do
-        if rb(ud + 2 + i) < 8 or rb(ud + 2 + i) >= 0x48 then valid = false end
+        if rb(ud + 2 + i) < 8 or rb(ud + 2 + i) >= 0x40 then valid = false end
     end
-    if rb(dex) == 2 and valid then
-        pages = {rb(ud + 2), rb(ud + 3), rb(ud + 4), rb(mp + 3)}
+    if rb(dex) >= 2 and valid then
+        pages = {rb(ud + 2), rb(ud + 3), rb(ud + 4), page(3)}
     end
-    local corrupt = rb(dex) >= 2 and not valid
+    -- doexit releases pages before wakeup, while still P_RUNNING, then
+    -- becomes P_ZOMBIE before switching away.
+    local proc = rw(ud)
+    local state = ram:read(0x48 * 0x4000 + proc)
+    local released = rw(ud + 2) == 0xFFFF and rw(ud + 4) == 0xFFFF and
+        rb(ud + 6) == 1 and proc >= assert(symbols._ptab) and proc < 0x4000 and
+        (state == 7 or (state == 1 and rb(ud + 7) == 0))
+    local corrupt = rb(dex) >= 2 and not valid and not released
     local key = bytes(ud + 6, 2) .. bytes(trace_alias, 2) .. tostring(st.HALT.value)
-    if key ~= last or t >= 25 then
+    if key ~= last or t >= stop_time then
         last = key
         f:write(string.format("t=%.3f PC=%04X SP=%04X HALT=%s dex=%02X insys=%02X call=%02X err=%04X arg=%04X brk=%04X up=%s mp=%s kp=%s trace_alias=%04X\n",
             t, st.PC.value, st.SP.value, tostring(st.HALT.value), rb(dex),
@@ -102,12 +128,13 @@ emu.register_frame(function()
             bytes(ud + 2, 4), bytes(mp, 4), bytes(kp, 3), rw(trace_alias)))
         f:flush()
     end
-    if st.HALT.value ~= 0 or corrupt or t >= 25 then
+    if st.HALT.value ~= 0 or corrupt or t >= stop_time then
         if tap then tap:remove() end
         if exec_tap then exec_tap:remove() end
         f:write("stop=" .. (corrupt and "invalid user pages" or st.HALT.value ~= 0 and "HALT" or "time limit") .. "\n")
         f:write("dbg=" .. bytes(assert(symbols._sprinter_dbg), 16) .. "\n")
         f:write("stack=" .. bytes(st.SP.value, 64) .. "\n")
+        f:write(string.format("hardware pages=%02X %02X %02X %02X\n", page(0), page(1), page(2), page(3)))
         for _, name in ipairs({"AF", "BC", "DE", "HL", "IX", "IY", "I", "IM", "IFF1", "IFF2"}) do
             if st[name] then f:write(string.format("reg %s=%04X\n", name, st[name].value)) end
         end

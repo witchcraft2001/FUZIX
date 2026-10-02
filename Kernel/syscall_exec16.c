@@ -57,103 +57,6 @@ static uint16_t sprinter_exec_fail_count;
 #define EX_SDBG(stage, a, b, c, d, e, f, g, h) do { } while (0)
 #endif
 
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-static inoptr sprinter_pid1_synth_ino(uint16_t inum, uint16_t isize,
-				      uint16_t blk0)
-{
-	inoptr ino;
-	inoptr j;
-	uint_fast8_t i;
-	extern void spr_map_win0_k(void);
-
-	spr_map_win0_k();
-	if (fs_tab[0].m_dev == NO_DEVICE)
-		fs_tab[0].m_dev = root_dev;
-	ino = NULLINODE;
-	for (j = i_tab; j < i_tab + (ITABSIZE / 2); j++) {
-		if (j->c_refs == 0) {
-			ino = j;
-			break;
-		}
-	}
-	if (!ino)
-		return NULLINODE;
-	ino->c_node.i_mode = 0x81ED;
-	ino->c_node.i_nlink = 1;
-	ino->c_node.i_uid = 0;
-	ino->c_node.i_gid = 0;
-	ino->c_node.i_size = isize;
-	ino->c_node.i_atime = 0;
-	ino->c_node.i_mtime = 0;
-	ino->c_node.i_ctime = 0;
-	ino->c_node.i_addr[0] = blk0;
-	ino->c_node.i_addr[1] = 0;
-	for (i = 2; i < 20; i++)
-		ino->c_node.i_addr[i] = 0;
-	ino->c_dev = root_dev;
-	ino->c_num = inum;
-	ino->c_super = 0;
-	ino->c_magic = CMAGIC;
-	ino->c_flags = 0;
-	ino->c_readers = 0;
-	ino->c_writers = 0;
-	ino->c_refs = 1;
-	return ino;
-}
-
-/* Bring-up /bin/sh: stock V7 sh (29968B, blks 1057-1074 + ind 1075). */
-static const uint16_t spr_v7sh_addr[20] = {
-	1057, 1058, 1059, 1060, 1061, 1062, 1063, 1064,
-	1065, 1066, 1067, 1068, 1069, 1070, 1071, 1072,
-	1073, 1074, 1075, 0
-};
-
-static inoptr sprinter_pid1_synth_sh(void)
-{
-	inoptr ino;
-	uint_fast8_t i;
-
-	ino = sprinter_pid1_synth_ino(177, 29968, spr_v7sh_addr[0]);
-	if (!ino)
-		return NULLINODE;
-	for (i = 0; i < 20; i++)
-		ino->c_node.i_addr[i] = spr_v7sh_addr[i];
-	return ino;
-}
-
-static inoptr sprinter_pid1_init_open(uint8_t *exec_name)
-{
-	if (!exec_name || !udata.u_ptab || udata.u_ptab->p_pid != 1)
-		return NULLINODE;
-
-	/* Kernel exec_or_die("/init") — path in kernel space.
-	 * Root dirent "init" points at a directory (ino 131); the
-	 * sprinit_raw payload is inode 132 / block 293. */
-	if (udata.u_sysio &&
-	    exec_name[0] == '/' && exec_name[1] == 'i' &&
-	    exec_name[2] == 'n' && exec_name[3] == 'i' &&
-	    exec_name[4] == 't')
-		return sprinter_pid1_synth_ino(132, 214, 293);
-
-	/*
-	 * Sticky u_sysio from earlier kernel I/O blocked the userland
-	 * "/bin/sh" match.  Clear only for the known sprinit_raw path
-	 * pointer — do NOT ugetc() here from CODE3 (bank smash).
-	 */
-	if ((uarg_t)exec_name == 0x01C2)
-		udata.u_sysio = false;
-
-	/*
-	 * Userland sprinit_raw: literal "/bin/sh" at 0x01C2 (moves if
-	 * the probe size changes — keep in sync with sprinit_raw.s).
-	 * Root dirent is off-by-one; synthesize stock V7 sh (ino 177).
-	 */
-	if (!udata.u_sysio && (uarg_t)exec_name == 0x01C2)
-		return sprinter_pid1_synth_sh();
-	return NULLINODE;
-}
-#endif
-
 /* We don't share this routine between the exec routines as we optimise the
    8bit one differently */
 static void close_on_exec(void)
@@ -296,14 +199,6 @@ arg_t _execve(void)
 	ino = NULLINODE;
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	sprinter_exec_fail_stage = 0xA1;
-	ino = sprinter_pid1_init_open(exec_name);
-	if (ino) {
-		EX_SDBG(0xEB,
-			(uint8_t)(uarg_t)ino, (uint8_t)(((uarg_t)ino) >> 8),
-			(uint8_t)ino->c_node.i_mode, (uint8_t)(ino->c_node.i_mode >> 8),
-			(uint8_t)ino->c_dev, (uint8_t)(ino->c_dev >> 8),
-			(uint8_t)ino->c_num, (uint8_t)(ino->c_num >> 8));
-	}
 	sprinter_exec_fail_stage = 0xA2;
 #endif
 	if (!ino)

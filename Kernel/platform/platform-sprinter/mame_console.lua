@@ -15,6 +15,11 @@ for name, index in pairs(manager.machine.devices[":ram"].items) do
     if name:match("m_pointer$") then ram = emu.item(index) end
 end
 assert(ram, "Sprinter RAM save item not found")
+local hw
+for name, index in pairs(manager.machine.devices[":"].items) do
+    if name:match("/m_pages$") then hw = emu.item(index) end
+end
+assert(hw and hw.count == 4, "Sprinter hardware map save item not found")
 local rx
 local tty
 emu.register_frame(function()
@@ -31,8 +36,7 @@ emu.register_frame(function()
     tty = cpu.spaces["program"]:install_read_tap(0x10000 + pc, 0x10000 + pc, "console-tty", function()
         if cpu.state.PC.value ~= pc then return end
         local sp = cpu.state.SP.value
-        -- Bring-up keeps the live stack on 4B and kernel data on 48.
-        local stack = 0x4B * 0x4000 + (sp & 0x3FFF)
+        local stack = (hw:read(3) & 0xFF) * 0x4000 + (sp & 0x3FFF)
         local flags = 0x48 * 0x4000 + assert(symbols._ttydata) + 32 + 4
         input:write(string.format("tty t=%.6f char=%02X iflag=%02X%02X lflag=%02X%02X\n",
             manager.machine.time:as_double(), ram:read(stack + 5),

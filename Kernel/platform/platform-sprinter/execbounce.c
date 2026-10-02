@@ -30,15 +30,7 @@ extern void spr_uput_win0(uint8_t *src, uint8_t *dst, usize_t n);
 #define EB_FOFF	sprinter_exec_tmp[2]
 #define EB_N	sprinter_exec_tmp[3]
 
-/* Stock V7 sh: 18 direct + single indirect @ 1075 */
-static const uint16_t sh_direct[18] = {
-	1057, 1058, 1059, 1060, 1061, 1062, 1063, 1064,
-	1065, 1066, 1067, 1068, 1069, 1070, 1071, 1072,
-	1073, 1074
-};
-
-#define SH_IND	1075
-#define SH_NDIR	18
+#define EB_NDIR	18
 #define BOUNCE_MAX	512
 
 static void spr_bounce_code3(void)
@@ -82,12 +74,13 @@ int sprinter_exec_bounce_body(inoptr ino, uint8_t *dst, usize_t bin_size)
 			if (chunk > (uint16_t)(EB_N - copied))
 				chunk = (uint16_t)(EB_N - copied);
 
-			if (lbn < SH_NDIR)
-				fsblk = sh_direct[lbn];
-			else if (SH_IND) {
+			if (lbn < EB_NDIR)
+				fsblk = ino->c_node.i_addr[lbn];
+			else if (lbn < EB_NDIR + BLKSIZE / sizeof(blkno_t) &&
+				 ino->c_node.i_addr[EB_NDIR]) {
 				if (!ind_ok) {
 					td_raw = 0;
-					bp = bread(rdev, SH_IND, 0);
+					bp = bread(rdev, ino->c_node.i_addr[EB_NDIR], 0);
 					if (!bp) {
 						sprinter_exec_fail_stage = 0xC1;
 						goto fail;
@@ -97,7 +90,7 @@ int sprinter_exec_bounce_body(inoptr ino, uint8_t *dst, usize_t bin_size)
 					ind_ok = 1;
 					spr_bounce_code3();
 				}
-				fsblk = sprinter_exec_ind[lbn - SH_NDIR];
+				fsblk = sprinter_exec_ind[lbn - EB_NDIR];
 			} else {
 				sprinter_exec_fail_stage = 0xC3;
 				goto fail;

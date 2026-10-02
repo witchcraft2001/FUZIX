@@ -100,9 +100,10 @@ void pagemap_init(void)
 	/*
 	 *	Add user pages to the free pool.
 	 *	Kernel uses high pages 0x48-0x4F.
-	 *	User pages are 0x08-0x47; 0x50-0x5F are VRAM.
+	 *	0x40 holds the live DCP port table; 0x41 is BIOS RAM.
+	 *	Keep firmware pages 0x40-0x47 out of the user pool.
 	 */
-	for (i = 8; i < 0x48; i++)
+	for (i = 8; i < 0x40; i++)
 		pagemap_add(i);
 }
 

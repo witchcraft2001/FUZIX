@@ -252,10 +252,10 @@ init_hardware:
 
         ; set system RAM size
 	; Sprinter has 4MB RAM = 4096KB
-	; We use pages 0x04-0x4F for user space = 76 pages * 16K = 1216K
+	; The user pool excludes firmware and kernel pages (56 * 16K).
         ld hl, #4096
         ld (_ramsize), hl
-        ld hl, #1152		; 72 * 16K user pages
+        ld hl, #896		; 56 * 16K user pages
         ld (_procmem), hl
 
 	; Text mode 80x32 is initialized by BIOS at power-on.
@@ -326,25 +326,25 @@ clscol:
 
 	; Set up IM2 interrupt vectors.
 	;
-	; WIN3 is always mapped, with discard starting at C300. Reserve
-	; C000..C100 for all 257 vector bytes and C1C1..C1C3 for the JP.
+	; WIN3 is always mapped. Keep vectors above PROGTOP=E000 and
+	; below common at EE00: E000..E100 table, E1E1..E1E3 jump.
 	; External IRQ supplies FF, so an FF00 table would wrap into WIN0.
-	; Repeated C1 bytes resolve to C1C1 for both odd and even vectors.
-	ld hl, #0xC000
-	ld de, #0xC001
+	; Repeated E1 bytes resolve to E1E1 for both odd and even vectors.
+	ld hl, #0xE000
+	ld de, #0xE001
 	ld bc, #256
-	ld (hl), #0xC1
+	ld (hl), #0xE1
 	ldir
 
 	; Minimal bring-up IRQ stub (reti, leave IFF1 clear) — not the
 	; FUZIX interrupt_handler, whose exit clears _int_disabled and
 	; ei's into an IRQ storm on Sprinter FRAME/CTC.
 	ld a, #0xC3			; JP instruction
-	ld (0xC1C1), a
+	ld (0xE1E1), a
 	ld hl, #sprinter_bringup_int
-	ld (0xC1C2), hl
+	ld (0xE1E2), hl
 
-	ld a, #0xC0
+	ld a, #0xE0
 	ld i, a
 	im 2
 
@@ -441,7 +441,7 @@ plt_interrupt_all:
 ; sprinter_bringup_int - minimal IRQ stub used during platform bring-up.
 ;
 ; Any IM2 vector (CTC, SIO, ULA FRAME, ISA, etc) is routed here via the
-; table at C000..C100 (I=C0, fill C1 → stub at C1C1).  We acknowledge
+; table at E000..E100 (I=E0, fill E1 → stub at E1E1).  We acknowledge
 ; the interrupt with `reti` but leave IFF1 cleared so the kernel stays
 ; in its post-`di` state.  This is a workaround for FUZIX's core
 ; interrupt_handler exit which always clears _int_disabled and `ei`s --
@@ -946,11 +946,33 @@ map_apply_pophl:
 	.globl map_kernel_di
 	.globl map_kernel_restore
 	.globl map_buffers
+; COMMONMEM / live WIN3 stack. Syscall entry has already set u_insys;
+; reset write progress before readwrite's zero-length/error early returns.
+; The bring-up return guard must not reuse the preceding write's u_done.
+; Preserve AF and IRQ state, then map WIN0/1/2 through map_kernel below.
+map_kernel_di:
+	push af
+	ld a, (_udata + U_DATA__U_INSYS)
+	or a
+	jr z, mkdi_done
+	ld a, (_udata + U_DATA__U_ININTERRUPT)
+	or a
+	jr nz, mkdi_done
+	ld a, (_udata + U_DATA__U_CALLNO)
+	cp #8
+	jr nz, mkdi_done
+	ld a, (mpgsel_cache)
+	cp #0x40
+	jr nc, mkdi_done
+	xor a
+	ld (_udata + 0x9F), a
+	ld (_udata + 0xA0), a
+mkdi_done:
+	pop af
 _map_kernel:
 map_kernel:
 map_buffers:
 map_kernel_restore:
-map_kernel_di:
 	push af
 	; WIN0 must always be kernel CODE (0x48).  _kernel_pages[0] can hold
 	; a user page after map_proc; remapping that hides i_tab → iobad.
@@ -1512,9 +1534,8 @@ _copy_common:
 
 ;=========================================================================
 ; _sprinter_seed_common - full 16K copy of the running kernel common page
-; (WIN3, currently page 0x4B) into the target page.  Used once at boot
-; to initialise PID1 (init)'s p_page[3] so that the first fork() does
-; not propagate uninitialised bytes as the child's "common" bank.
+; (WIN3) into the target page. Used at boot or before PID1's first fork
+; to initialise its owned common page with the live stack and kernel code.
 ;
 ; Unlike _copy_common, which only ships 3.5K of high kernel code from
 ; 0xF200, this routine copies the entire 0xC000-0xFFFF range so udata,
@@ -1532,8 +1553,13 @@ _sprinter_seed_common:
 	push bc
 	; Called from create_init()/map_init() during boot, IRQs are
 	; already off here.  We do NOT ei inside this routine.
-	di			; must stay off through the switch below
 	ld a, e
+	.globl _spr_seed_top
+; Register entry: A = allocated common page, WIN0 must hold kernel CODE.
+; Map WIN1 via A, copy the live WIN3 stack/code, then switch WIN3 via A.
+; Return with IRQs disabled.
+_spr_seed_top:
+	di
 	call map_for_swap	; map target page at WIN1 (0x4000-0x7FFF)
 				; A now holds the actual page (target,
 				; or 0x49 if caller passed an invalid
@@ -1566,9 +1592,8 @@ _sprinter_seed_common:
 	; Switching here makes init's u_page[3] and the running
 	; MPGSEL_3 agree, and fork_copy then propagates the live common.
 	;
-	; _kernel_pages[3] is deliberately left at 0x4B: sanitize_kpages
-	; only inspects the array, so it stays a no-op, and map_kernel
-	; never touches MPGSEL_3.  top_bank tracks the real port value.
+	; top_bank aliases _kernel_pages[3]; both it and the cache must
+	; describe the new live common after the copied stack is installed.
 	out (MPGSEL_3), a	; switch first; SP still finds identical bytes
 	; We are now running on the target common page.  Both mpgsel_cache
 	; and top_bank live IN common, so writing them here updates the
@@ -1646,10 +1671,6 @@ plt_trace_store_idx:
 _tmpout:
 	.db 1
 
-;
-; Keep _sprinter_trace_buf + _sprinter_dbg entirely below 0xFF00.
-; 0xFF00-0xFFFF is reserved for the IM2 vector page.
-;
 SPR_TRACE_LEN	.equ	1
 
 ;=========================================================================
@@ -1903,8 +1924,7 @@ set_mpgsel2_ok:
 	ret
 
 ;
-; Keep this banner line outside _COMMONDATA so debug latches still fit
-; below the IM2 vector page at 0xFF00.
+; Keep this banner line outside _COMMONDATA to leave room for debug latches.
 ;
 ; PID1 "/init" path must live in always-mapped common (WIN3), not CODE/WIN0
 ; (user page may be mapped there during n_open) and not COMMONDATA (BSS wipe).
@@ -1923,6 +1943,12 @@ _spr_common_init_argv:
 
 _spr_common_init_envp:
 		.dw 0
+
+; Kernel pathname must survive the CODE1 -> CODE3 filesystem call.
+	.globl _spr_tty_path
+_spr_tty_path:
+		.ascii "/dev/tty1"
+		.db 0
 
 ; Set by sprinter_apply_user_reloc() after kernel-side reloc of a
 ; FUZIX z80_rel binary.  _doexec then passes DE=0 so crt0's reloc loop
@@ -1993,7 +2019,7 @@ _sprinter_nullh_count	.equ _spr_exec_diag + 15
 
 ;
 ; Exec / i_deref bring-up latches collapsed into one scratch block.
-; Full separate .dw/.db storage pushed COMMONDATA into the IM2 vector
+; Full separate .dw/.db storage overlapped the former IM2 vector
 ; page at 0xFF00 (I=0xFF); dbg[] writes then corrupted the vector table
 ; and userland died with RST38 after a few syscalls.
 ;
@@ -2001,8 +2027,7 @@ _spr_exec_diag:
 	.ds 16
 
 ; up*/mp*/I / nmi / panic_bytes / null_sp snapshots alias exec_diag —
-; frees storage so COMMONDATA ends ≤ 0xFF00 after sys_diag grew to 16
-; and doexec arm/seen regained real bytes.
+; saves common storage after sys_diag grew to 16 and arm/seen regained bytes.
 _sprinter_rst38_up0	.equ _spr_exec_diag + 0
 _sprinter_rst38_up1	.equ _spr_exec_diag + 1
 _sprinter_rst38_up2	.equ _spr_exec_diag + 2
@@ -2055,7 +2080,7 @@ _sprinter_last_wr_site	.equ _spr_exec_diag + 12
 ;
 ; Legacy bring-up latches below are no longer used on the active path.
 ; Keep symbol ABI for existing probes but collapse storage into one scratch
-; block so active diagnostics stay below the IM2 vector page (0xFF00).
+; block to conserve common memory.
 ;
 _spr_legacy_diag	.equ _spr_misc_diag
 
@@ -2110,7 +2135,7 @@ _spr_va_top	.equ _spr_legacy_diag + 3
 ;
 ; Collapse unused ch_link / getinode / i_alloc / getdev probes into one
 ; scratch block.  Separate .db/.dw storage pushed COMMONDATA past 0xFF00
-; and corrupted the IM2 vector page (_sprinter_dbg started at 0xFEFF).
+; and corrupted the former IM2 page (_sprinter_dbg started at 0xFEFF).
 ;
 _spr_misc_diag:
 	.ds 8
@@ -2147,8 +2172,7 @@ _spr_gd_mnt	.equ _spr_misc_diag + 10
 _spr_gd_state	.equ _spr_misc_diag + 12
 
 ;
-; Syscall enter/exit probes share one scratch block so COMMONDATA stays
-; below the IM2 vector page at 0xFF00 (COMMONMEM growth shifts this area).
+; Syscall enter/exit probes share one scratch block to conserve common.
 ; Must be 16 bytes: exit probes write +10..+15 (was backed by arm/seen/dbg).
 ;
 _spr_sys_diag:
@@ -2206,6 +2230,6 @@ _spr_boot_count		.equ _spr_misc_diag + 6
 _sprinter_trace_idx	.equ _spr_misc_diag + 0
 _sprinter_trace_buf	.equ _spr_misc_diag + 2
 
-; dbg[] aliases exec_diag (16B).  Saves a second .ds 16 so COMMONDATA
-; ends ≤ 0xFF00; exec-fail latches are idle once /bin/sh is running.
+; dbg[] aliases exec_diag (16B), saving a second .ds 16.
+; Exec-fail latches are idle once /bin/sh is running.
 _sprinter_dbg		.equ _spr_exec_diag

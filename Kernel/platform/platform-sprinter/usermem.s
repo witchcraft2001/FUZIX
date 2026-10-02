@@ -62,12 +62,9 @@ save_k12:
 ; Map user pages for DE into WIN1/WIN2; return DE in 0x4000-0xBFFF.
 ; Preserves BC (saved kernel WIN1/WIN2) and IRQ state.
 ;
-; Sprinter keeps live common permanently in WIN3 (udata + user stack
-; below PROGTOP).  map_proc_2 never switches MPGSEL_3, and u_page[3]
-; is only a fork seed copy.  Remapping bank-index 3 into WIN1/WIN2
-; therefore (a) writes the wrong physical page and (b) unmaps the
-; active CODE bank — ioctl(TIOCGPGRP) to a stack buffer at 0xEDE4
-; was the first hit.  Addresses in 0xC000-0xFFFF stay as-is.
+; WIN3 holds live kernel common, initially 4B rather than PID1's owned
+; u_page[3] until the first fork. Kernel addresses there must stay as-is.
+; User addresses below C000 are windowed; C000..DFFF uses live common.
 user_map_de:
 	ld a, d
 	cp #0xC0
@@ -92,7 +89,15 @@ um_b1_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a
 	inc hl
+	; WIN2's successor is live WIN3, not PID1's unseeded owned page.
+	ld a, c
+	cp #2
+	jr nz, um_next_page
+	ld a, (mpgsel_cache + 3)
+	jr um_next_live
+um_next_page:
 	ld a, (hl)
+um_next_live:
 	cp #0x08
 	jr c, um_b2_bad
 	cp #0x50
@@ -309,8 +314,8 @@ uputget:
 ;
 ; Bulk kernel→user copy for exec bounce.  Src must live in WIN0 (always
 ; mapped); dest is windowed through WIN1/WIN2 once, then one LDIR.
-; Banked ABI: args at IX+6/+8/+10 (same as __uput).  Keep this small —
-; COMMONDATA must end ≤ 0xFF00 (IM2 page).
+; Banked ABI: args at IX+6/+8/+10 (same as __uput). Crossing BFFF/C000
+; uses live WIN3 through the successor window; the kernel stack stays put.
 ;
 _spr_uput_win0:
 	push ix

@@ -15,92 +15,8 @@ extern uint8_t spr_initio_stage;
 extern uint16_t spr_initio_fd;
 extern uint16_t spr_initio_err;
 extern uint8_t spr_initio_files[3];
-extern arg_t _open(void);
+extern arg_t spr_boot_open(void);
 extern arg_t _dup(void);
-
-static arg_t sprinter_open_boot_tty(uint16_t flag)
-{
-	int_fast8_t uindex;
-	int_fast8_t oftindex;
-	inoptr ino;
-
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xC8;
-	sprinter_dbg[16] = (uint8_t)TTYDEV;
-	sprinter_dbg[17] = (uint8_t)(TTYDEV >> 8);
-	sprinter_dbg[18] = (uint8_t)flag;
-	sprinter_dbg[19] = (uint8_t)(flag >> 8);
-	sprinter_dbg[20] = 0xFF;
-	sprinter_dbg[21] = 0xFF;
-	sprinter_dbg[22] = 0xFF;
-	sprinter_dbg[23] = 0xFF;
-#endif
-	if ((uindex = uf_alloc()) == -1)
-		return -1;
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xC9;
-	sprinter_dbg[20] = (uint8_t)uindex;
-#endif
-	if ((oftindex = oft_alloc()) == -1) {
-		udata.u_files[uindex] = NO_FILE;
-		return -1;
-	}
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xCA;
-	sprinter_dbg[21] = (uint8_t)oftindex;
-#endif
-	for (ino = i_tab; ino < i_tab + ITABSIZE; ++ino) {
-		if (ino->c_refs == 0)
-			break;
-	}
-	if (ino == i_tab + ITABSIZE) {
-		of_tab[oftindex].o_refs = 0;
-		udata.u_files[uindex] = NO_FILE;
-		udata.u_error = ENFILE;
-		return -1;
-	}
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xCB;
-	sprinter_dbg[22] = (uint8_t)(uarg_t)ino;
-	sprinter_dbg[23] = (uint8_t)(((uarg_t)ino) >> 8);
-#endif
-	memset(ino, 0, sizeof(*ino));
-	ino->c_magic = CMAGIC;
-	/* Char-device inodes must carry the device number in c_dev.
-	 * Using root_dev left c_dev=0 after mount churn and made write(1)
-	 * hit iobad / EINVAL (MAME: iobad ptr=… dev=0000). */
-	ino->c_dev = TTYDEV;
-	ino->c_node.i_mode = F_CDEV | 0666;
-	ino->c_node.i_nlink = 1;
-	ino->c_node.i_addr[0] = TTYDEV;
-	ino->c_refs = 1;
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xCC;
-#endif
-	if (d_open(TTYDEV, flag) != 0) {
-		ino->c_refs = 0;
-		of_tab[oftindex].o_refs = 0;
-		udata.u_files[uindex] = NO_FILE;
-		return -1;
-	}
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xCD;
-	sprinter_dbg[20] = (uint8_t)udata.u_error;
-#endif
-	of_tab[oftindex].o_inode = ino;
-	of_tab[oftindex].o_ptr = 0;
-	of_tab[oftindex].o_access = flag;
-	udata.u_files[uindex] = oftindex;
-	if (O_ACCMODE(flag) != O_RDONLY)
-		ino->c_writers++;
-	if (O_ACCMODE(flag) != O_WRONLY)
-		ino->c_readers++;
-	tty_post(ino, minor(TTYDEV), flag);
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xCE;
-#endif
-	return uindex;
-}
 
 void sprinter_bootmark(char c)
 {
@@ -211,7 +127,7 @@ static void sprinter_prepare_init_stdio(void)
 
 	udata.u_sysio = 1;
 	spr_initio_stage = 0xC1;
-	fd = sprinter_open_boot_tty(O_RDWR);
+	fd = spr_boot_open();
 	spr_initio_stage = 0xC2;
 	spr_initio_fd = (uint16_t)fd;
 	spr_initio_err = udata.u_error;

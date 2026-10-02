@@ -11,7 +11,6 @@ disable-pkg platform-sprinter
 r /init
 f 0755 /init          ../../../Applications/util/sprinit_raw
 
-# Bring-up /bin/sh: stock V7 sh via geometric bounce + spr_uput_win0.
-# (Synth open uses FS blks 1057-1075; pkg path is best-effort.)
+# Keep the verified V7 fsh at the path used by the boot probe.
 r /bin/sh
-f 0755 /bin/sh        ../../../Applications/V7/cmd/sh/sh
+f 0755 /bin/sh        ../../../Applications/V7/cmd/sh/fsh

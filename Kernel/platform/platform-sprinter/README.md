@@ -3,11 +3,17 @@
 Port of FUZIX OS to the Sprinter — a Russian ZX Spectrum-compatible home computer
 with a full Z80 CPU upgrade, 4 MB RAM and IDE storage.
 
-**Latest checkpoint (2026-10-02):** the exec sector mismatch is fixed, and
-V7 `fsh` accepts PS/2 input, executes `set`, and returns to the prompt without
-heap errors. External commands still fail in `fork`; interrupts, filesystem
-guardrails, and the special exec loader remain in bring-up mode. See the final
-update below. Earlier sections describe historical checkpoints.
+**Latest checkpoint (2026-10-02, PROGTOP E000 / WIN3 user stack):**
+User memory ends at `E000`, adding 8 KB above the previous C000 limit;
+the full-size user stack is now in WIN3. IM2 occupies `E000..E100` with
+its jump at `E1E1`; udata/kernel stacks/code remain at `EE00` and above.
+Repeated echo, all 117 entries from `ls /bin`, large exec/fork and a
+one-page small-map fork/wait probe pass. A separate large PID1 `/init`
+also boots to the shell. IM2, DCP and executable code survive unchanged.
+The production tiny `/init`, PID1 argument workarounds, disk-write guards,
+heap-growth guards and disabled normal IRQ handling remain bring-up
+limitations. ISA gateway work is deferred until driver integration.
+See the final update below. Earlier sections are historical.
 
 ## Hardware
 
@@ -29,15 +35,24 @@ update below. Earlier sections describe historical checkpoints.
 FUZIX uses `CONFIG_BANK16` — four 16 KB windows mapped to physical RAM pages.
 
 ```
-Address range    Window  Kernel page  Contents
-0x0000–0x3FFF   WIN0     page 0       CODE (kernel init, low-level routines)
-0x4000–0xBFFF   WIN1/2   pages 1–2    CODE1 (banked; overlaid CODE2/3 for syscalls)
-0xC000–0xFFFF   WIN3     page 3       COMMONMEM (always visible)
+Address range    Window  Physical pages
+0x0000–0x3FFF   WIN0     48: kernel CODE/data, or process page 0
+0x4000–0x7FFF   WIN1     49 / 4C / 4E: CODE1 / CODE2 / CODE3
+0x8000–0xBFFF   WIN2     4A / 4D / 4F: upper half of the selected code bank
+0xC000–0xFFFF   WIN3     4B at boot, then the active process's common page
 
-Pages 4–5  →  CODE2 bank (overlaid at 0x4000 for syscall groups)
-Pages 6–7  →  CODE3 bank (overlaid at 0x4000 for remaining syscalls)
-Pages 8–79 →  user processes (72 pages × 16 KB = 1152 KB user space)
-Pages 0x50–0x5F  VRAM (not used for processes)
+Pages 08–3F → user pool (56 × 16 KB = 896 KB)
+Pages 40–47 → firmware/reserved; 40 is the live DCP, 41 is BIOS RAM
+Pages 48–4F → kernel image
+Pages 50–5F → VRAM (not used for processes)
+
+User memory ends at E000; a full-size process's user stack is below E000
+in WIN3, sharing its physical page with kernel common. IM2 lives at
+E000..E100 / E1E1, and udata/kernel stacks/code from EE00. Boot discard
+starts at C300 and is reclaimed by exec. Fork copies the allocated pages,
+including the complete top page; kernel mappings restore WIN0–2.
+Small maps can alias all four windows to one page: top=2000 leaves its
+upper 8 KB for common while the user stack is below 2000 in WIN0.
 ```
 
 ## Disk Layout
@@ -10797,3 +10812,491 @@ Capture PC/SP, all four actual MPGSEL values, I/IM/IFF1/IFF2, and
 `udata=EE00`, `_dofork=FB51`, `_switchin=FA66`,
 `mpgsel_cache=FEC2`, `_kernel_pages=FEC6`, `_spr_doexec_count=FED7`,
 `_sprinter_dbg=FEDA`; resolve them again after rebuilding.
+
+### Update from 2026-10-02: fork/exit returns to the parent shell
+
+**Current milestone:** the replay completes two forks, exits both children,
+resumes PID1, executes the follow-up `set`, and waits for input until t=25.006.
+The external command itself is still blocked by the old post-exec `n_open`
+guard. This checkpoint verifies process copying and return, not external exec.
+
+**Three independently observed faults and platform fixes:**
+
+1. The old pool included physical page `40`. The first child received
+   `40 41 42 43`, and its first 16 KB copy overwrote the DCP table with the
+   parent executable (the saved page differed from the source by one byte).
+   All later paging OUTs were decoded through that overwritten table:
+   hardware remained `48 40 44 4B` even while the software cache claimed
+   other pages. Thus the previous diagnosis of an actual switch to common
+   page `43` was incorrect: that value came from the software cache.
+   `discard.c:pagemap_init` now allocates only `08..3F`, excluding the
+   firmware range `40..47`. `config.h:MAX_MAPS` is 56 and reported process
+   memory is 896 KB. This protects both DCP and BIOS RAM.
+2. With paging restored, the last fork copy read PID1's unseeded common
+   page `3F` and switched the child onto blank page `3B`. Before copying,
+   `_dofork` now compares the live common cache with the owned `u_page[3]`.
+   If they differ, it uses the existing full-page seed helper through the
+   new A-register entry `_spr_seed_top`, moving the live stack/code from
+   `4B` onto the parent's owned `3F`. The saved parent frame then survives
+   a later switch-in, and the child gets a live common copy on `3B`.
+   Fork updates its common cache/top-bank alias after the switch, keeping
+   the parent's copy accurate; `_switchin` also updates the live cache.
+3. The child could then return zero from fork, print `echo: not found`,
+   and exit. The parent's restore still failed: the direct C frame at
+   `_switchin` was `[5472 return][1003 noopt AF][10A4 process]`, but the
+   routine treated `1003` as the process pointer and switched to page `08`.
+   The direct-call branch now consumes SDCC's noopt slot before the
+   argument. The assembly scheduler caller already supplies a matching
+   dummy slot; its stack layout remains valid.
+
+The firmware reservation is supported by the local primary sources:
+`mame/src/mame/sinclair/sprinter.cpp:machine_start` points `m_dcp_location`
+at RAM page `40`; BIOS `src/bios/exp/EXP.asm` documents DCP in page `40`
+and the BIOS RAM program in page `41`. The manual's
+`02_memory/01_windows.md` identifies `40..4F` as system RAM. All production
+and probe changes in this iteration are within `platform-sprinter/`.
+
+**Validation and probe changes:**
+
+- `make TARGET=sprinter diskimage` passes and regenerates IMG/CHD.
+- `mame_runtime.lua` and the console stack observer now use the driver's
+  exact `/m_pages` save item, masking its RAM bank flags. They read the
+  current hardware mapping rather than a fixed common page or cached
+  MPGSEL values. No address-space reads or forced memory writes are used.
+- `mame_fork.lua` records fork/copy/switch/exit observations, saves physical
+  pages `30..4F`, and saves page `40` before the fork. It posts a follow-up
+  `set` at t=18 after input posting has drained.
+- The before/after DCP comparison is identical for all **16384 bytes**.
+- Fork returns `0` in each child and `2` / `3` in the parent, with
+  `u_error=0`. Parent pages are `3C 3D 3E 3F`; child pages are `38 39 3A 3B`.
+  At t=25.006 PID1 is waiting in read, `brk=78E4`, no HALT or invalid pages,
+  and the hardware map is `48 4C 4D 3F`.
+- The pre-entry comparison still has **0 differing bytes** over loaded
+  image `0112..6988`. That range includes initialized data: the prior
+  description of the entire range as immutable text was inaccurate.
+  `fsh.map:__data=63BF` puts runtime data at `64BF`. Twenty later changes
+  are in that writable data; actual code `0112..64BE` has **0 differences**.
+  `check_runtime.py --map` supports this code-only runtime comparison,
+  while its default still checks the complete pre-entry load image.
+- `git diff --check` passes. No shared kernel source changed.
+
+Reproduce with the earlier MAME command, setting
+`FUZIX_MAME_COMMAND='echo test{ENTER}'` and changing its autoboot script to
+`Kernel/platform/platform-sprinter/mame_fork.lua`. Acceptance checks:
+
+```sh
+python3 Kernel/platform/platform-sprinter/check_runtime.py \
+  Images/sprinter/mame_out/runtime-entry.bin Applications/V7/cmd/sh/fsh
+python3 Kernel/platform/platform-sprinter/check_runtime.py \
+  Images/sprinter/mame_out/runtime-memory.bin Applications/V7/cmd/sh/fsh \
+  --map Applications/V7/cmd/sh/fsh.map
+cmp Images/sprinter/mame_out/fork-dcp-entry.bin \
+  Images/sprinter/mame_out/fork-page-40.bin
+```
+
+Console/register logs, entry/final snapshots, selected physical pages,
+DCP baseline, and the matching map are retained in
+`Images/sprinter/mame_out/runtime-baseline/fork-roundtrip/`.
+Final SHA256:
+
+- IMG: `d131fa0beeb01013bc6d299afc8d576770fb0c893b6b84db7518ba9aea5ddc1c`
+- CHD: `95a528231a7cc9939967202b43e10f7362c295dae66513782732e3a0c02c3547`
+
+**Next iteration:** restore real post-exec pathname walks and replace the
+hardcoded `/bin/sh` bounce geometry before attempting external program exec.
+The `not found` result is currently deliberate in `filesys.c:n_open`.
+Child exit also prints `filesystem corrupt.` after a blocked inode write;
+disk-write guardrails remain enabled and must be examined before enabling
+writes. Fast posted input lost the first `e` on the second attempt (`cho`);
+the PS/2 receive FIFO/polling latency and posting duplication remain open.
+Normal IRQ/scheduler timing is still disabled. The temporary IM2 table at
+`C000` also needs a kernel-only reservation or relocation before user heap
+growth is allowed into that address range.
+
+Focused next-run dumps: kernel page **48**, `2240..23FF` (the observed cwd /
+root inode at `2245`), process table `10A4..1139`, and both process common
+pages **3F / 3B**, `EE00..EFFF` (udata/stack) and `FED0..FF1F` (debug state).
+Include buffer metadata/content for the root directory block and the
+pathname bytes at the first real `n_open`. Current symbols: `_spr_seed_top=03F9`,
+`_dofork=FB55`, `_switchin=FA66`, `mpgsel_cache=FED6`, `_kernel_pages=FEDA`,
+`_spr_doexec_count=FEEB`, `_sprinter_dbg=FEEE`; resolve after every rebuild.
+
+### Update from 2026-10-02: real pathname lookup and external exec
+
+**Current milestone:** `echo test` prints `test`, exits with status zero,
+and returns to the parent shell. A separate `ls /bin` replay prints all
+117 non-hidden entries in the exact sorted order of directory inode 51 in
+`filesys.img`, exits, and returns to the prompt. Both `waitpid` calls return
+PID 2 with `u_error=0`; the child process-table slot is subsequently empty.
+
+Changes and the evidence behind them:
+
+1. Removed the obsolete post-exec `ENOENT` block from `filesys.c:n_open`.
+   This only deletes an existing `CONFIG_SPRINTER_EARLY_TRACE` workaround;
+   the non-Sprinter path is unchanged. Real directory walks now find both
+   external binaries. The small child binaries use stock `readi`, rather
+   than the PID1 bounce path.
+2. The first echo replay loaded correct code and wrote five bytes, but the
+   following zero-length write incorrectly returned five again. The old
+   syscall-return guard reused the preceding `u_done`; libc's flush loop
+   then reduced its length below zero and repeatedly wrote garbage.
+   Platform `map_kernel_di` now clears write progress at syscall entry
+   when `u_insys` is set, no interrupt is active and WIN0's cached map is
+   a user page. It preserves AF and the IRQ state. The same replay now
+   returns 5 for the data write and 0 for the empty write, then reaches exit.
+   The counter offset `0x9F` follows the existing bring-up return guard and
+   must be rechecked if the Z80 `u_data` layout changes.
+3. Exit then slept in `sync`: the synthetic boot console inode had
+   `c_dev=0201`, `c_num=0`, and was dirty after console output. `bwritei`
+   tried to read inode block 2 through the character device, leaving a
+   busy cache buffer and the child asleep on tty input. Platform
+   `plt_discard` now clears `CDIRTY` and sets `CRDONLY` on that synthetic
+   console node before initial exec. This prevents timestamp updates and
+   disk writeback for a node with no disk inode. It is guarded by
+   `CONFIG_SPRINTER_EARLY_TRACE`; real filesystem/device nodes are excluded.
+4. The PID1 bounce loader now reads direct and single-indirect block
+   addresses from its supplied inode, with a bounded indirect index.
+   Its private fixed shell block list is gone. The initial shell inode
+   and `/init` inode are still synthesized by the old exec bring-up code;
+   this does not yet remove their fixed image geometry.
+
+**Validation:** `make TARGET=sprinter diskimage` passes and regenerates IMG
+and CHD. Pre-entry image comparisons report zero differences for shell
+(3201 relocations), echo (243) and ls (2418). Shell code also has zero
+differences after each child returns; ls code has zero differences in the
+intermediate t=25 snapshot. Page 40 before/after is identical in both runs.
+At t=25.006 (echo) and t=75.018 (ls), PID1 waits in read with
+`brk=78E4`, user pages `3C 3D 3E 3F`, hardware `48 4C 4D 3F`, and no HALT.
+The echo replay also executes the posted follow-up `set` twice. Input posted
+while ls was running was not recovered as a follow-up command; FIFO/polling
+behaviour remains open. `git diff --check` passes.
+
+Replay script: `mame_fork.lua`, using `FUZIX_MAME_COMMAND='echo test{ENTER}'`
+or `'ls /bin{ENTER}'`. For the listing, use `FUZIX_MAME_STOP=75` and MAME
+`-seconds_to_run 80`; default trace duration remains 25 seconds.
+`mame_runtime.lua` now saves `runtime-exec-NN.bin` for subsequent execs and
+tracks their live user map. NN is the common-page exec count, copied at fork,
+not a globally unique process identifier. Fork function taps now check the
+actual code bank, avoiding false hits in overlapping user/kernel overlays.
+
+Logs, register/stack dumps, entry/final snapshots, DCP baseline, physical
+pages and matching maps are retained under
+`Images/sprinter/mame_out/runtime-baseline/external-echo/` and `external-ls/`.
+Final SHA256:
+
+- IMG: `d52b36d5598937cae921f628b8abcb5382da82c5623981c3149bbf0a770917a7`
+- CHD: `c4ba5aa7b089d8dd093f03c3d51deed0ae6eb37fd15eece9ee53361d360c7949`
+
+**Next targets:** replace synthetic PID1 exec/stdio with real filesystem
+inodes, then validate larger external programs and repeated child execs.
+Keep disk-write guards until metadata writes have their own focused replay.
+Normal IRQ/scheduler timing and the user-address overlap of the IM2 table
+at `C000..C100` / stub `C1C1` still prevent a release milestone.
+
+Focused next dumps: physical kernel page **48**, `16D8..1722` (synthetic tty),
+`21AF..228F` (recent exec/root inodes), `280F..3236` (five cache buffers),
+`10A4..1139` (parent/child table). In each live common page **3F / 3B** capture
+`EE00..EFFF` and `FEF0..FF30`; include pathname bytes and the real executable
+inode's size/address list before the next exec. Current symbols:
+`udata=EE00`, `_dofork=FB78`, `_switchin=FA89`, `mpgsel_cache=FEF9`,
+`_kernel_pages=FEFD`, `_spr_doexec_count=FF0E`, `_sprinter_dbg=FF11`.
+Resolve again after rebuilding.
+
+### Update from 2026-10-02: boot exec and console use real filesystem inodes
+
+**Current milestone:** the initial kernel exec opens real `/init`, its probe
+exec opens real `/bin/sh`, and inherited descriptors 0..2 refer to real
+`/dev/tty1`. No synthetic inode allocator remains in either boot path.
+Sequential `echo test` and `echo again` execute successfully; `waitpid`
+reaps PID 2 and PID 3 with `u_error=0`. The posting artifact also generates
+an extra `n: not found` attempt, whose child PID 4 is reaped normally.
+The independent `ls /bin` replay prints all 117 entries and returns to the
+prompt, with PID1 waiting in read at t=75.018.
+
+The former off-by-one inode hypothesis was stale. In the current image,
+root `init` correctly names inode **131**, mode `81ED`, size 214, block 293.
+The removed helper synthesized inode 132, which actually belongs to another
+file. Likewise, it synthesized inode 177 while reading blocks belonging to
+the separate `/bin/fsh` inode 176. Ordinary lookup now resolves both names.
+The Sprinter package installs the verified `fsh` binary as `/bin/sh`:
+inode **177**, size 29968, direct blocks **1003..1020**, indirect block **1021**.
+The on-disk payload equals `Applications/V7/cmd/sh/fsh` byte for byte.
+This change is confined to the self-disabled Sprinter overlay package.
+
+Changes:
+
+- Deleted the guarded synthetic exec helpers and their call in
+  `syscall_exec16.c`. Exec now takes the ordinary `n_open_lock` path.
+- Replaced guarded boot console construction in `start.c` with the
+  platform `spr_boot_open` helper. It opens `/dev/tty1` with `O_RDWR` via
+  `_open`; the existing bootstrap caller preserves/restores exec arguments
+  and duplicates the descriptor. The pathname lives in platform COMMONMEM
+  so it survives the CODE1/CODE3 transition. Device inode **32** now has
+  `c_dev=0001` (root disk), mode `21B0`, and `i_addr[0]=0201` (tty device).
+  This corrects the old claim that character inodes need TTYDEV in `c_dev`.
+- Removed the synthetic-console `plt_discard` safeguard from the previous
+  iteration. Real inodes inherit `CRDONLY` from the existing read-only root
+  mount, so their timestamps do not create bogus disk writeback requests.
+  The independent lower-level disk-write guards are still enabled.
+- Extended the read-only MAME trace to capture the first exec and kernel
+  page 48 at each exec. PID-qualified user snapshots retain both children
+  when their fork-inherited exec counters are equal. `FUZIX_MAME_FOLLOW`
+  selects the second posted command (default remains `set{ENTER}`).
+- Corrected a false trace stop: at t=31.887, ls had legitimately set all
+  four page bytes to `FF` before switching away; child status was
+  `P_ZOMBIE=7`, parent status `P_READY=2`, PC `44D3` in `getproc`.
+  Both observers now accept this released-page marker only in syscall
+  context with a zombie process-table entry. Other invalid maps still
+  stop the replay; valid user pages are bounded by the `08..3F` pool.
+
+**Validation:** `make TARGET=sprinter diskimage` passes and regenerates IMG
+and CHD. The first `/init` body has zero byte differences before entry.
+The full 64-byte dinodes captured for init, shell and console exactly match
+the filesystem. Pre-entry relocated shell, both echo children, and ls each
+have zero image differences; final parent shell code has zero differences.
+DCP page 40 remains identical over 16384 bytes. The completed ls replay
+reaps PID 2 and waits in read with `brk=78E4`, pages `3C 3D 3E 3F`, hardware
+`48 49 4A 3F`, and no HALT. Both shared-source edits only remove/replace
+existing guarded bring-up code: SDCC preprocessing against zxevo produces
+the same token streams before/after for `start.c` and `syscall_exec16.c`.
+No new unguarded core fix was introduced. `git diff --check` passes.
+
+Evidence is retained under
+`Images/sprinter/mame_out/runtime-baseline/real-boot/`,
+`real-boot-repeat/`, and `real-boot-ls/`, including matching kernel/application
+maps, binaries, per-exec user/kernel snapshots, console/register logs, DCP
+and final physical pages. `real-boot-ls-exit/` preserves the false-stop dump;
+its ls code also matches the original. Repeated-exec replay uses
+`FUZIX_MAME_COMMAND='echo test{ENTER}'`,
+`FUZIX_MAME_FOLLOW='echo again{ENTER}'`, `FUZIX_MAME_STOP=35`, and MAME
+`-seconds_to_run 40` with `mame_fork.lua`. Listing uses the earlier 75/80
+second settings. Final SHA256:
+
+- IMG: `3009e1505bdad0f342549a6a0b3afafad3e4dece6cbae3be57e78eafafb38d0d`
+- CHD: `6ddbda8903291e605aec529821096e7adf94a71e8550faa2ae10749086cbbbc7`
+
+**Next targets:** remove PID1 argument packing shortcuts and advance from
+the tiny boot probe to normal init. Resolve the IM2 table's overlap with
+user memory before allowing larger heaps or enabling normal IRQ scheduling.
+Metadata-write validation must use an explicit writable-root replay; the
+current root is read-only. PS/2 posting duplication/FIFO loss remains open.
+
+Focused next dumps: kernel page **48**, `2164..228F` (exec/tty/directory/root
+inodes), `1558..1567` (first open-file entry), `10A4..1139` (process table),
+and `280F..3236` (buffer cache). Common pages **3F / 3B**:
+`EE00..EFFF`, `FF00..FF42`, and IM2 `C000..C100` / `C1C1..C1C3`.
+Current symbols: `_spr_tty_path=F47D`, `_spr_boot_open=4041`,
+`_switchin=FA93`, `_dofork=FB82`, `mpgsel_cache=FF03`, `_kernel_pages=FF07`,
+`_spr_doexec_count=FF18`, `_sprinter_dbg=FF1B`. Resolve after each rebuild.
+
+### Update from 2026-10-02: reserve WIN3 for IM2 and kernel common
+
+**Current milestone:** the process address limit is `PROGTOP=C000`, so a
+full-size process has 48 KB of address space and its user stack starts at
+`BFEC`, below WIN3. IM2 remains at `C000..C100` with its jump at `C1C1`;
+`udata` and the kernel stacks stay at `EE00..EFFF`. This separates normal
+program loading, heap/stack allocation and validated user pointers from
+the interrupt table. It is a software address-space limit, not hardware
+write protection on the Z80.
+
+The local manual's `02_memory/01_windows.md` confirms the four independent
+16 KB windows, and `01_architecture/02_cpu_z84c15.md` describes the 257-byte
+IM2 table. The table must remain mapped through user/kernel transitions.
+Reserving WIN3 avoids adding another table to the crowded high common code
+or putting vectors in a window that syscalls remap.
+
+Changes are entirely within `platform-sprinter/`:
+
+- `config.h` moves PROGTOP from EE00 to C000. Linker common placement is
+  independent and remains EE00. A full process still allocates four pages:
+  three user pages and one common page. Swap sizing remains 60 KB because
+  its existing image also includes common state through EFFF; swap is not
+  validated by these read-only-root runs.
+- `maplimit.c` wraps stock bank16k `pagemap_prepare`: after normalizing the
+  header's base/default size, it rejects a 16-bit sum of base and size above
+  C0 pages with ENOMEM. Both operands are widened before adding, so a base
+  of 01 plus an explicit size FF cannot wrap to zero. Sprinter's `rules.mk`
+  renames only the stock allocator object's entry to `spr_prep_old`.
+  Other targets continue using their original entry and configuration.
+- `fork_copy` now adds 3FFF when counting pages, matching bank16k's full
+  16 KB common overhead. The old 0FFF assumed a smaller reserved tail and
+  would copy only one page for a process with top 2000, then incorrectly
+  install its user page as common. The new count copies user and common.
+- The platform linker list includes `maplimit.rel`. `fuzix.lnk` was an
+  ignored source file despite being required by the build; the platform
+  ignore exception now exposes it for version control and review.
+- Both read-only observers accept the all-FF released-page marker while
+  `_exit` is still P_RUNNING, as well as after P_ZOMBIE. `doexit` frees the
+  pages before waking the parent and setting zombie status. The first
+  negative exec replay stopped at PC 43C2 in wakeup, not at a corrupt map.
+
+**Validation:** after changing config.h, use `make kclean TARGET=sprinter`
+followed by `make TARGET=sprinter diskimage`. An initial incremental build
+mixed the new allocator with old EE00 constants in start/main and produced
+an invalid repeated-page map; the clean build fixed it. Inspect the linked
+initializers, not just build success, after changing memory geometry.
+Final build regenerates both IMG and CHD and passes `git diff --check`.
+
+The production image passes repeated `echo test` / `echo again` and
+`ls /bin`: child entry images match their relocated binaries, parent shell
+code has zero differing bytes, both echo children are reaped without errors,
+and all 117 ls names match the filesystem. At t=75.018 the shell is waiting
+in read, `brk=78E4`, user pages `3C 3D 3E 3F`, hardware `48 4C 4D 3F`,
+with no HALT. IM2's 257 C1 bytes and `C3 76 F1` stub are unchanged in exec
+snapshots and common pages 3F/3B; DCP page 40 has 16384 identical bytes.
+
+A separate clone of the image contains three temporary test fixtures,
+without changing the production filesystem package:
+
+- `mapbig`: echo with a_size=C0, giving top=C100; exec returns ENOMEM.
+- `mapwrap`: echo with a_size=FF, giving a widened top=10000; exec returns
+  ENOMEM. Neither rejected exec reaches doexec; the parent reaps both
+  children and continues. Keyboard posting still produces extra fragments.
+- `mapfork`: absolute asm probe with a_size=1F and top=2000. Its write of
+  one byte from C000 returns EFAULT. Parent pages `38 3B 3B 3B` then fork
+  with two copies (B=02, then B=01), and child pages `39 3A 3A 3A` retain
+  a valid common context. It prints `SMALL FORK CHILD OK`, the parent reaps
+  the grandchild and prints `SMALL FORK WAIT OK`, then the shell reaps the
+  probe. A subsequent `echo alive` also succeeds.
+
+Evidence lives under `Images/sprinter/mame_out/runtime-baseline/`:
+`common-reserved-repeat/`, `common-reserved-ls/`,
+`common-reserved-limit-checked/`, and `common-reserved-small/` contain
+console/register logs, per-exec snapshots, physical pages, matching maps,
+binaries and `validation.txt`. `common-reserved-fixtures/` preserves the
+fixture source/binaries and separate test IMG/CHD. `common-reserved-probe/`
+and `common-reserved-limit/` are failed diagnostic replays, not checkpoints.
+Final production SHA256:
+
+- IMG: `138a80d08980390e6475958d5258f5d30b4394c0e4fe3ca815798a52860e4989`
+- CHD: `c494586266bdaad58fe5f2126e3d9043d0d4ca869bf67ba51af687316bac85bc`
+
+**Next targets:** remove PID1 argument packing shortcuts and advance to
+normal init. Normal IRQ dispatch/scheduler timing still require their own
+replay; reserving IM2 does not enable them. Keep metadata-write guards until
+a writable-root replay verifies updates. PS/2 posting duplication/FIFO loss
+and the guarded heap-growth limits remain open.
+
+**ISA constraint confirmed in the local network drivers:** the RTL8019
+`src/lib/isa.asm::ISA_OPEN` and 3C509B `src/lib/isa.asm::OPEN` select the
+ISA window through PORT_SYSTEM/PAGE3 (D4/D6), replacing C000..FFFF.
+The BIOS `Shared_Includes/constants/SP2000.inc` documents this memory-cycle
+gateway. The PROGTOP=E000 / IM2=E000 layout does not solve ISA coexistence:
+ISA also hides the IM2
+table, udata, kernel stack and common instructions. Keeping the user stack
+in WIN2 at PROGTOP=C000 does not keep the kernel stack accessible.
+
+Before integrating ISA NIC access, provide a platform-local gateway whose
+instructions, saved mapping state, temporary stack and transfer buffer are
+outside WIN3. Enter it with kernel WIN0 pinned, save the IRQ state, disable
+maskable IRQs, and switch stacks before opening ISA. Close ISA and restore
+the exact RAM mapping before accessing udata, using common code, restoring
+the common stack or calling the scheduler/network stack. Bound each transfer
+to control IRQ latency. DI does not mask NMI: the present 0066 jump targets
+common, so NMI needs a gateway-safe entry or a verified source mask too.
+This gateway has not been implemented or validated. Port-level DCP aliases
+must not be assumed to replace the working WIN3 gateway without checking
+the active FPGA/DCP addressing contract.
+
+Focused next dumps: user stack `BF00..BFFF` in WIN2 page **3E** (parent)
+or **3A** (ordinary child), common pages **3F / 3B**, `C000..C100`,
+`C1C1..C1C3`, `EE00..EFFF`, and `FF00..FF42`. In kernel page **48** capture
+`10A4..1184` (parent/child process slots), `2164..228F` (inodes), and
+`280F..3236` (buffer cache). For the small probe, user stack is in page
+**38 / 39**, `1F00..1FFF`, and its common pages are **3B / 3A**.
+Current symbols: `_pagemap_prepare=775A`, `_spr_prep_old=6A8D`,
+`_switchin=FA93`, `_dofork=FB82`, `mpgsel_cache=FF03`, `_kernel_pages=FF07`,
+`_spr_doexec_count=FF18`, `_sprinter_dbg=FF1B`. Resolve after each rebuild.
+
+### Update: PROGTOP E000 and user stack in WIN3 (2026-10-02)
+
+The user approved raising the memory limit to the MSX2 level and deferring
+ISA driver coexistence work. PROGTOP is now E000, so C000..DFFF becomes
+user memory and the full-size user stack moves into WIN3. The 257-byte IM2
+table moved to E000..E100, filled with E1; all vector bytes resolve to the
+JP at E1E1..E1E3. I=E0, IM2 mode, and the existing bring-up IRQ absorber
+remain in use. This does not enable normal interrupt dispatch.
+
+`fork_copy` now adds 1FFF to u_top before counting 16 KB pages, matching
+the stock bank16k allocator's 8 KB reserved tail. Full-size maps still
+copy four pages. A top=2000 map now needs only one page, with the lower
+8 KB holding user code/data/stack and the upper 8 KB holding IM2/common.
+The platform exec-size guard accepts a_base=01/a_size=DF (top=E000), while
+rejecting E0 and FF with ENOMEM; the widened sum still prevents wraparound.
+
+Raising the limit exposed a PID1 bounce-copy dependency: until its first
+fork, live WIN3 is kernel page 4B, while u_page[3]=3F is not yet seeded.
+`user_map_de` now selects the live cached WIN3 page as WIN2's successor
+when mapping an original WIN2 address. Thus a bulk transfer or word copy
+crossing BFFF/C000 reaches the live page, rather than PID1's empty owned
+page. Addresses already in C000..DFFF remain directly accessible, and the
+kernel/common stack stays mapped. Changes in this iteration are confined
+to `platform-sprinter/`; no new core or application changes were needed.
+
+**Clean build and MAME validation:** `make kclean TARGET=sprinter` followed
+by `make TARGET=sprinter diskimage` generated the production IMG and CHD.
+Six independent replays passed, with no HALT or invalid user-page stop:
+
+- Repeated `echo test` / `echo again`: both children run, exit and are
+  reaped; shell returns to read. Shell entry has u_top=E000, u_isp=DFEC;
+  echo children use DFE8/DFE7. All 3201 shell relocation sites and its
+  final code bytes match; both echo bodies match after 243 relocations.
+- `ls /bin`: all 117 names match the production filesystem directory;
+  its loaded body matches after 2418 relocations and the shell resumes.
+- `maplarge`: a separate absolute probe with explicit top=E000 and a
+  49664-byte file loads through C2FF. All 49646 bytes from entry 0112
+  match before execution, including BFFF/C000. It prints data at C100,
+  forks with four copies (B=04,03,02,01), prints child/wait success, and
+  both the probe and its child are reaped. Parent page 3B and child page
+  37 retain the C100..C2FF payload. A write from E000 returns EFAULT.
+- `mapfork`: top=2000 gives parent pages `3B 3B 3B 3B` and child pages
+  `3A 3A 3A 3A`. Fork performs exactly one page copy (B=01), child/wait
+  success prints, both processes are reaped, and subsequent `echo alive`
+  succeeds. Its user stack starts at 1FEC; E000 access returns EFAULT.
+- `mapbig` / `mapwrap`: a_base=01 with a_size=E0 / FF produces two
+  ENOMEM exec returns, no doexec-3 entry and an intact parent shell.
+- Large boot `/init`: a separate 49664-byte absolute fixture loads
+  through C2FF before PID1's first fork. All 49646 body bytes match in
+  the pre-entry snapshot with live WIN3=4B. Its C100 message appears on
+  screen and it execs the shell, whose relocated entry and final code
+  match. Input posted at t=13 arrived before shell readiness (about
+  t=19.6), so this replay validates boot/exec, not an echo command.
+
+In every replay, all saved pre-exec and final user images retain the full
+E000..E100 table and E1E1 jump to F176. Physical DCP page 40 is unchanged
+from the baseline. Common occupies EE00..FF4C, with COMMONDATA at FF0D
+for 40 hex bytes. The existing PS/2 input duplication/FIFO issue still
+produces occasional suffix commands; it remains separate bring-up work.
+
+Evidence under `Images/sprinter/mame_out/runtime-baseline/`:
+`progtop-e000-repeat/`, `progtop-e000-ls/`, `progtop-e000-maps/`,
+`progtop-e000-small/`, `progtop-e000-limits/`, and
+`progtop-e000-boot-large/` contain console/register logs, exec snapshots,
+physical pages, matching kernel/maps/application binaries and
+`validation.txt`. `progtop-e000-fixtures/` contains raw probe sources,
+binaries, the validation script and separate test filesystem/IMG/CHD.
+The production image retains the tiny init and has no added test commands.
+`progtop-e000-final/` records a further repeated-echo replay against the
+final rebuilt CHD: both child images and final shell code match, IM2/DCP
+remain intact, and both children are reaped. The final kernel binary is
+identical to the one used for the six earlier replays.
+Final production SHA256:
+
+- IMG: `a4b099513ef7328f9f212ddf175b3273ddd5dbfd64302a0454b310cf6e4e607c`
+- CHD: `697eebf6a189732f84c17b612d755775f377b1f52813dbfa87cdd179ccfade53`
+
+**Next targets:** normal init/PID1 argument cleanup, normal IRQ scheduling,
+PS/2 input reliability and guarded heap/root-write validation. The raised
+limit does not remove the existing positive-sbrk/brk bring-up caps. ISA
+access still needs the gateway described above before NIC integration.
+
+Focused hardware dumps for this checkpoint: user stack `DF00..DFFF` and
+IM2 `E000..E100` / `E1E1..E1E3` in parent common page **3F** or ordinary
+child page **3B**; `EE00..EFFF` and `FF00..FF4C` in the same page. For the
+small map, capture user stack `1F00..1FFF` and common `2000..3FFF` within
+parent physical page **3B** / child **3A**. For PID1 before first fork,
+live WIN3 remains **4B**, not owned page 3F. Kernel page **48**:
+`10A4..1184` (process slots), `2164..228F` (inodes), `280F..3236` (buffers).
+Current symbols: `_pagemap_prepare=775A`, `_spr_prep_old=6A8D`,
+`_switchin=FA93`, `_dofork=FB82`, `mpgsel_cache=FF0D`, `_kernel_pages=FF11`,
+`_spr_doexec_count=FF22`, `_sprinter_dbg=FF25`. Resolve after each rebuild.
