@@ -6,6 +6,7 @@
 #include <kdata.h>
 #include <printf.h>
 #include <timer.h>
+#include <tty.h>
 #include <devtty.h>
 #include <tinydisk.h>
 #include <rtc.h>
@@ -80,6 +81,87 @@ void plt_interrupt(void)
 void plt_discard(void)
 {
 }
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+/*
+ * Rewrite unrelocatable libc `CD 00 00 D0` (call 0; ret nc) to
+ * `CD 00 01 D0` (call PROGLOAD/sys_stubs).  Run before doexec via uget
+ * into the WIN0 bounce buffer — map_apply must not walk large images.
+ */
+void sprinter_patch_syscalls(void)
+{
+	uaddr_t a;
+	uaddr_t end = udata.u_break;
+	usize_t n;
+	usize_t i;
+	uint8_t *tmp;
+	extern uint8_t sprinter_exec_bounce[];
+	extern uint8_t sprinter_dbg[];
+
+	if (end < PROGLOAD + 4)
+		return;
+
+	tmp = sprinter_exec_bounce;
+	a = PROGLOAD;
+	while (a + 3 < end) {
+		n = end - a;
+		if (n > 2048)
+			n = 2048;
+		if (uget((uint8_t *)a, tmp, n))
+			break;
+		for (i = 0; i + 3 < n; i++) {
+			if (tmp[i] == 0xCD && tmp[i + 1] == 0x00 &&
+			    tmp[i + 2] == 0x00 && tmp[i + 3] == 0xD0) {
+				uputc(0x01, (uint8_t *)(a + i + 2));
+				sprinter_dbg[14] = 0xDE;
+			}
+		}
+		if (n <= 3)
+			break;
+		a += n - 3;
+	}
+}
+#endif
+
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+/*
+ * Device-table entries for tty.  Force CODE1 around tty_* :
+ * bounce / bank_1_3 can leave WIN1/2 on CODE2/3 while CODE1 still
+ * thinks it is running — the next fetch then hits FONT (RST38).
+ * Safe: these wrappers and tty_* both live in CODE1.
+ */
+extern void sprinter_force_bank1(void);
+
+int spr_tty_ioctl(uint_fast8_t minor, uarg_t request, char *data)
+{
+	int r;
+
+	sprinter_force_bank1();
+	r = tty_ioctl(minor, request, data);
+	sprinter_force_bank1();
+	return r;
+}
+
+int spr_tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
+{
+	int r;
+
+	sprinter_force_bank1();
+	r = tty_read(minor, rawflag, flag);
+	sprinter_force_bank1();
+	return r;
+}
+
+int spr_tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
+{
+	int r;
+
+	sprinter_force_bank1();
+	r = tty_write(minor, rawflag, flag);
+	sprinter_force_bank1();
+	return r;
+}
+#endif
 
 /*
  *	CMOS RTC access

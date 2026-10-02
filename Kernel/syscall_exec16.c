@@ -30,18 +30,19 @@ extern uint16_t spr_doexec_call_ra0;
 extern uint16_t spr_doexec_call_ra1;
 extern uint16_t spr_doexec_call_af;
 extern uint16_t spr_doexec_call_start;
+extern void sprinter_patch_syscalls(void);
 #define EX_TRACE(x) plt_trace(x)
 #define EX_SDBG(stage, a, b, c, d, e, f, g, h) \
 	do { \
-		sprinter_dbg[15] = (uint8_t)(stage); \
-		sprinter_dbg[16] = (uint8_t)(a); \
-		sprinter_dbg[17] = (uint8_t)(b); \
-		sprinter_dbg[18] = (uint8_t)(c); \
-		sprinter_dbg[19] = (uint8_t)(d); \
-		sprinter_dbg[20] = (uint8_t)(e); \
-		sprinter_dbg[21] = (uint8_t)(f); \
-		sprinter_dbg[22] = (uint8_t)(g); \
-		sprinter_dbg[23] = (uint8_t)(h); \
+		sprinter_dbg[0] = (uint8_t)(stage); \
+		sprinter_dbg[1] = (uint8_t)(a); \
+		sprinter_dbg[2] = (uint8_t)(b); \
+		sprinter_dbg[3] = (uint8_t)(c); \
+		sprinter_dbg[4] = (uint8_t)(d); \
+		sprinter_dbg[5] = (uint8_t)(e); \
+		sprinter_dbg[6] = (uint8_t)(f); \
+		sprinter_dbg[7] = (uint8_t)(g); \
+		sprinter_dbg[8] = (uint8_t)(h); \
 	} while (0)
 #else
 static uint8_t sprinter_exec_fail_stage;
@@ -100,39 +101,55 @@ static inoptr sprinter_pid1_synth_ino(uint16_t inum, uint16_t isize,
 	return ino;
 }
 
-static inoptr sprinter_pid1_init_open(uint8_t *exec_name)
+/* Bring-up /bin/sh: stock V7 sh (29968B, blks 1057-1074 + ind 1075). */
+static const uint16_t spr_v7sh_addr[20] = {
+	1057, 1058, 1059, 1060, 1061, 1062, 1063, 1064,
+	1065, 1066, 1067, 1068, 1069, 1070, 1071, 1072,
+	1073, 1074, 1075, 0
+};
+
+static inoptr sprinter_pid1_synth_sh(void)
 {
+	inoptr ino;
 	uint_fast8_t i;
 
+	ino = sprinter_pid1_synth_ino(177, 29968, spr_v7sh_addr[0]);
+	if (!ino)
+		return NULLINODE;
+	for (i = 0; i < 20; i++)
+		ino->c_node.i_addr[i] = spr_v7sh_addr[i];
+	return ino;
+}
+
+static inoptr sprinter_pid1_init_open(uint8_t *exec_name)
+{
 	if (!exec_name || !udata.u_ptab || udata.u_ptab->p_pid != 1)
 		return NULLINODE;
 
-	/* Kernel exec_or_die("/init") — path in kernel space. */
+	/* Kernel exec_or_die("/init") — path in kernel space.
+	 * Root dirent "init" points at a directory (ino 131); the
+	 * sprinit_raw payload is inode 132 / block 293. */
 	if (udata.u_sysio &&
 	    exec_name[0] == '/' && exec_name[1] == 'i' &&
 	    exec_name[2] == 'n' && exec_name[3] == 'i' &&
 	    exec_name[4] == 't')
-		return sprinter_pid1_synth_ino(131, 218, 293);
+		return sprinter_pid1_synth_ino(132, 214, 293);
 
 	/*
 	 * Sticky u_sysio from earlier kernel I/O blocked the userland
-	 * "/bin/sh" match (argn was 0x01C6 but !u_sysio failed).  Only
-	 * clear it for the known sprinit_raw path pointer.
+	 * "/bin/sh" match.  Clear only for the known sprinit_raw path
+	 * pointer — do NOT ugetc() here from CODE3 (bank smash).
 	 */
-	if ((uarg_t)exec_name == 0x01C6)
+	if ((uarg_t)exec_name == 0x01C2)
 		udata.u_sysio = false;
 
-	/* Userland sprinit_raw: literal "/bin/sh" at 0x01C6. */
-	if (!udata.u_sysio && (uarg_t)exec_name == 0x01C6) {
-		inoptr ino = sprinter_pid1_synth_ino(177, 26630, 1003);
-		if (!ino)
-			return NULLINODE;
-		for (i = 0; i < 18; i++)
-			ino->c_node.i_addr[i] = 1003 + i;
-		ino->c_node.i_addr[18] = 1021;
-		ino->c_node.i_addr[19] = 0;
-		return ino;
-	}
+	/*
+	 * Userland sprinit_raw: literal "/bin/sh" at 0x01C2 (moves if
+	 * the probe size changes — keep in sync with sprinit_raw.s).
+	 * Root dirent is off-by-one; synthesize stock V7 sh (ino 177).
+	 */
+	if (!udata.u_sysio && (uarg_t)exec_name == 0x01C2)
+		return sprinter_pid1_synth_sh();
 	return NULLINODE;
 }
 #endif
@@ -507,6 +524,31 @@ arg_t _execve(void)
 	ebuf = (struct s_argblk *) tmpbuf();
 
 	/* Read args and environment from process memory */
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Header readi() leaves u_sysio sticky.  On Sprinter BANK16,
+	 * spr_map_win0_k() already put kernel page 0 in WIN0, so
+	 * rargs() via kernel deref of user argv walks CODE into E2BIG
+	 * (stage 8).  sprinit_raw always passes argv={"/bin/sh",0} and
+	 * empty env — synthesize both.
+	 */
+	udata.u_sysio = false;
+	if (udata.u_ptab->p_pid == 1) {
+		abuf->a_buf[0] = '/';
+		abuf->a_buf[1] = 'b';
+		abuf->a_buf[2] = 'i';
+		abuf->a_buf[3] = 'n';
+		abuf->a_buf[4] = '/';
+		abuf->a_buf[5] = 's';
+		abuf->a_buf[6] = 'h';
+		abuf->a_buf[7] = 0;
+		abuf->a_argc = 1;
+		abuf->a_arglen = 8;
+		ebuf->a_argc = 0;
+		ebuf->a_arglen = 0;
+		udata.u_error = 0;
+	} else {
+#endif
 	if (rargs(argv, abuf))
 	{
 		EX_TRACE(0xF7);
@@ -514,18 +556,6 @@ arg_t _execve(void)
 		sprinter_exec_fail_err = udata.u_error;
 		goto nogood3;	/* SN */
 	}
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/*
-	 * PID1 bring-up: second rargs(envp) via ugetp has been seen to
-	 * fail while leaving a stale EEXIST from the prior write(1).
-	 * sprinit_raw always passes an empty env — skip the usermem walk.
-	 */
-	if (udata.u_ptab->p_pid == 1) {
-		ebuf->a_argc = 0;
-		ebuf->a_arglen = 0;
-		udata.u_error = 0;
-	} else
-#endif
 	if (rargs(envp, ebuf))
 	{
 		EX_TRACE(0xF7);
@@ -533,6 +563,9 @@ arg_t _execve(void)
 		sprinter_exec_fail_err = udata.u_error;
 		goto nogood3;	/* SN */
 	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	}
+#endif
 	EX_TRACE(0xF8);
 
 	/* This must be the last test as it makes changes if it works */
@@ -656,6 +689,19 @@ arg_t _execve(void)
 		(uint8_t)udata.u_count, (uint8_t)(((uarg_t)udata.u_count) >> 8),
 		(uint8_t)udata.u_top, (uint8_t)(udata.u_top >> 8),
 		0, 0);
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * PID1 large exec: bounce via platform geometric loader.
+	 * Avoids readi/i_tab (WIN0 aliases smash the synth dinode).
+	 */
+	if (udata.u_ptab && udata.u_ptab->p_pid == 1 && bin_size > 256) {
+		extern int sprinter_exec_bounce_body(inoptr ino, uint8_t *dst,
+						     usize_t bin_size);
+		if (sprinter_exec_bounce_body(ino, (uint8_t *)progptr,
+					      bin_size) < 0)
+			goto nogood4;
+	} else
+#endif
 	readi(ino, 0);
 	if (udata.u_done != bin_size)
 	{
@@ -840,6 +886,105 @@ arg_t _execve(void)
 	spr_doexec_call_start = 0;
 	spr_doexec_seen = 0;
 	spr_doexec_arm = 1;
+	/*
+	 * Prove PROGLOAD landed on u_page (uget via WIN1) before doexec.
+	 * Must run while _kernel_pages still names CODE3 — save/restore
+	 * from a CODE1 soft-home would OUT 0x49/0x4A and unmap this
+	 * CODE3 caller.  Soft-restore CODE1 only after the probes.
+	 */
+	{
+		uint8_t sig0;
+		uint8_t sig12;
+		extern uint8_t kernel_pages[];
+
+		sig0 = (uint8_t)ugetc((uint8_t *)progload);
+		sig12 = (uint8_t)ugetc((uint8_t *)(progload + 0x12));
+		sprinter_dbg[9] = sig0;
+		sprinter_dbg[10] = sig12;
+		sprinter_dbg[11] = ((uint8_t *)&udata.u_page)[0];
+		/* sys_stubs begin with JP; V7 sh body marker at +0x12 is D5 */
+		if (sig0 != 0xC3) {
+			sprinter_exec_fail_stage = 0xEE;
+			sprinter_exec_fail_err = (uint16_t)sig0 |
+				((uint16_t)sig12 << 8);
+			sprinter_exec_fail_done = (uint16_t)progload;
+			sprinter_exec_fail_count =
+				(uint16_t)((uint8_t *)&udata.u_page)[0] |
+				((uint16_t)((uint8_t *)&udata.u_page)[1] << 8);
+			goto nogood4;
+		}
+		/*
+		 * Kernel-side reloc for /bin/sh only (2nd+ doexec), then
+		 * reinstall stubs.  User crt0 reloc after stubs has been
+		 * followed by a post-sbrk user wipe of page0; applying
+		 * reloc in-kernel and passing DE=0 avoids that path.
+		 * Do not run on /init — an earlier attempt broke synth
+		 * open of /bin/sh (execve returned to sprinit hang).
+		 */
+		{
+			extern uint8_t spr_doexec_count;
+			extern int sprinter_apply_user_reloc(uaddr_t progload,
+							    uaddr_t entry);
+			extern void map_kernel(void);
+			uint_fast8_t si;
+
+			kernel_pages[1] = 0x4E;
+			kernel_pages[2] = 0x4F;
+			map_kernel();
+			if (spr_doexec_count >= 1) {
+				(void)sprinter_apply_user_reloc(progload,
+								entry_abs);
+				for (si = 0; si < sizeof(struct exec); si++) {
+					if (uputc(sys_stubs[si],
+						  (uint8_t *)(progload + si))) {
+						sprinter_exec_fail_stage = 0xF2;
+						sprinter_exec_fail_err =
+							udata.u_error;
+						sprinter_exec_fail_done =
+							(uint16_t)(progload + si);
+						goto nogood4;
+					}
+				}
+			}
+			/*
+			 * Rewrite libc `CD 00 00 D0` → `CD 00 01 D0` in CODE3
+			 * via the WIN0 bounce buffer.
+			 */
+			{
+				uaddr_t a;
+				uaddr_t end = udata.u_break;
+				extern uint8_t sprinter_exec_bounce[];
+				uint8_t *tmp = sprinter_exec_bounce;
+
+				a = progload;
+				while (a + 3 < end) {
+					usize_t n = end - a;
+					usize_t i;
+
+					if (n > 512)
+						n = 512;
+					if (uget((uint8_t *)a, tmp, n))
+						break;
+					for (i = 0; i + 3 < n; i++) {
+						if (tmp[i] == 0xCD &&
+						    tmp[i + 1] == 0x00 &&
+						    tmp[i + 2] == 0x00 &&
+						    tmp[i + 3] == 0xD0) {
+							uputc(0x01,
+							      (uint8_t *)(a + i + 2));
+							sprinter_dbg[14] = 0xDE;
+						}
+					}
+					if (n <= 3)
+						break;
+					a += n - 3;
+				}
+			}
+		}
+		/* Soft-home CODE1 for the next user→kernel map_kernel. */
+		kernel_pages[1] = 0x49;
+		kernel_pages[2] = 0x4A;
+	}
 	doexec(entry_abs);
 	sprinter_exec_fail_stage = 13;
 	sprinter_exec_fail_err = 0;

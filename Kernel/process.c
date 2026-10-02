@@ -82,18 +82,26 @@ static void do_psleep(void *event, uint_fast8_t state)
 	      event < (void *)(&ttyinq[0] + NUM_DEV_TTY + 1)) ||
 	     (event >= (void *)&ttydata[0] &&
 	      event < (void *)(&ttydata[0] + NUM_DEV_TTY + 1)))) {
+		/*
+		 * EI via COMMONMEM gate: skip when sprinter_bringup_noei
+		 * (2nd+ doexec) so sh console read cannot take a stray
+		 * IRQ into FONT.  /init (noei=0) still EI's around poll.
+		 * Keep kbd/timer as banked C calls (stubs required).
+		 */
+		extern void sprinter_psleep_tty_ei(void);
+		extern void sprinter_psleep_maybe_ei(void);
 		extern void kbd_poll(void);
 
 		udata.u_ptab->p_wait = event;
 		udata.u_ptab->p_waitno = ++waitno;
 		udata.u_ptab->p_status = P_RUNNING;
-		ei();
+		sprinter_psleep_tty_ei();
 		kbd_poll();
 		timer_interrupt();
 		di();
 		udata.u_ptab->p_wait = NULL;
 		udata.u_ptab->p_status = P_RUNNING;
-		ei();
+		sprinter_psleep_maybe_ei();
 		return;
 	}
 #endif
@@ -118,17 +126,19 @@ static void do_psleep(void *event, uint_fast8_t state)
 		 * for tty waits instead of panic("psleep: voodoo").
 		 */
 		if (udata.u_ptab->p_pid == 1) {
+			extern void sprinter_psleep_tty_ei(void);
+			extern void sprinter_psleep_maybe_ei(void);
 			extern void kbd_poll(void);
 
 			udata.u_ptab->p_wait = event;
 			udata.u_ptab->p_waitno = ++waitno;
 			udata.u_ptab->p_status = P_RUNNING;
-			ei();
+			sprinter_psleep_tty_ei();
 			kbd_poll();
 			timer_interrupt();
 			di();
 			udata.u_ptab->p_wait = NULL;
-			ei();
+			sprinter_psleep_maybe_ei();
 			return;
 		}
 #endif
@@ -774,7 +784,20 @@ void unix_syscall(void)
 		/* We will check the signals before we return to user space
 		   so all is good */
 	}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * Stock path EI's here before unix_pop.  With bringup_noei that
+	 * races a stray IRQ into FONT (seen right after the first sh
+	 * console read completed).  Gate via the COMMONMEM helper so
+	 * asm unix_pop's skip is not undone by this C ei().
+	 */
+	{
+		extern void sprinter_psleep_maybe_ei(void);
+		sprinter_psleep_maybe_ei();
+	}
+#else
 	ei();
+#endif
 	chksigs();
 }
 

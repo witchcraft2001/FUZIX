@@ -2,7 +2,7 @@ local OUTDIR = os.getenv("FUZIX_MAME_OUT") or "."
 local dumped=false
 emu.register_frame(function()
   local t=manager.machine.time:as_double()
-  if dumped or t<5.5 then return end
+  if dumped or t<14 then return end
   dumped=true
   local cpu=manager.machine.devices[":maincpu"]
   local mem=cpu.spaces["program"]
@@ -32,7 +32,7 @@ emu.register_frame(function()
   -- Simpler: use dbg/boot marks already on screen via previous method
   -- Read rows using sprvideo layout: for each row, set page once per col
   local rows={}
-  for row=0,19 do
+  for row=0,31 do
     local chars={}
     for col=0,79 do
       local py = ((col+1) | 0x80) & 0xFF
@@ -49,4 +49,5 @@ emu.register_frame(function()
     if t:match("%S") then f:write(string.format("R%02d|%s\n", i-1, t)) end
   end
   f:close()
+  manager.machine:exit()
 end)

@@ -35,9 +35,21 @@ void sprinter_restore_devsw(void)
 
 	dev_tab[2].dev_open = tty_open;
 	dev_tab[2].dev_close = tty_close;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern int spr_tty_ioctl(uint_fast8_t minor, uarg_t request, char *data);
+		extern int spr_tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+		extern int spr_tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+
+		dev_tab[2].dev_read = spr_tty_read;
+		dev_tab[2].dev_write = spr_tty_write;
+		dev_tab[2].dev_ioctl = spr_tty_ioctl;
+	}
+#else
 	dev_tab[2].dev_read = tty_read;
 	dev_tab[2].dev_write = tty_write;
 	dev_tab[2].dev_ioctl = tty_ioctl;
+#endif
 
 	dev_tab[3].dev_open = no_open;
 	dev_tab[3].dev_close = no_close;
@@ -124,11 +136,11 @@ void map_init(void)
 		} else {
 			sprinter_bootmark('Q');
 		}
-		sprinter_dbg[24] = pp[0];
-		sprinter_dbg[25] = pp[1];
-		sprinter_dbg[26] = pp[2];
-		sprinter_dbg[27] = pp[3];
-		sprinter_dbg[28] = pp[3];
+		sprinter_dbg[8] = pp[0];
+		sprinter_dbg[9] = pp[1];
+		sprinter_dbg[10] = pp[2];
+		sprinter_dbg[11] = pp[3];
+		sprinter_dbg[12] = pp[3];
 		sprinter_bootmark('t');
 	}
 #else

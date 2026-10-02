@@ -1,4 +1,4 @@
-APPOTHER = cpuinfo sprinit0 sprinit_raw
+APPOTHER = cpuinfo sprinit0 sprinit_raw sprsh_raw
 include Makefile.common
 
 cpuinfo: cpuinfo.o cpuinfo-z80.o
@@ -8,7 +8,13 @@ sprinit_raw: sprinit_raw.s
 	rm -f sprinit_raw.rel sprinit_raw.ihx sprinit_raw.lk sprinit_raw.lst sprinit_raw.sym sprinit_raw.noi sprinit_raw
 	sdasz80 -o sprinit_raw.rel sprinit_raw.s
 	sdldz80 -b _HEADER=0x0100 -n -i sprinit_raw.ihx -m -j sprinit_raw.rel
-	makebin -p -o 0x100 sprinit_raw.ihx sprinit_raw
+	makebin -p -o 256 sprinit_raw.ihx sprinit_raw
+
+sprsh_raw: sprsh_raw.s
+	rm -f sprsh_raw.rel sprsh_raw.ihx sprsh_raw.lk sprsh_raw.lst sprsh_raw.sym sprsh_raw.noi sprsh_raw
+	sdasz80 -o sprsh_raw.rel sprsh_raw.s
+	sdldz80 -b _HEADER=0x0100 -n -i sprsh_raw.ihx -m -j sprsh_raw.rel
+	makebin -p -o 0x100 sprsh_raw.ihx sprsh_raw
 
 sprinit0:
 	@:

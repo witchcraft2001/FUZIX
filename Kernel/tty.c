@@ -12,6 +12,7 @@ extern uint16_t spr_rw_count;
 extern uint8_t spr_rw_access;
 extern uint16_t spr_rw_mode;
 extern uint16_t spr_rw_dev;
+extern uint8_t sprinter_bringup_noei;
 #endif
 
 /*
@@ -52,6 +53,13 @@ int tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 	used(rawflag);
 	used(flag);			/* shut up compiler */
 
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xB0;
+	spr_rw_fd = (uint8_t)minor;
+	spr_rw_base = (uint16_t)(uarg_t)udata.u_base;
+	spr_rw_count = (uint16_t)udata.u_count;
+#endif
+
 	q = &ttyinq[minor];
 	t = &ttydata[minor];
 
@@ -63,13 +71,40 @@ int tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 #endif				
 		        if ((t->flag & TTYF_DEAD) && (!q->q_count))
 				goto dead;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			spr_rw_stage = 0xB1;
+			spr_rw_mode = (uint16_t)q->q_count;
+#endif
 			if (remq(q, &c)) {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+				spr_rw_stage = 0xB2;
+				spr_rw_access = c;
+#endif
 				if (udata.u_sysio)
 					*udata.u_base = c;
-				else
+				else {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+					/*
+					 * Sprinter: udata / user stack live in WIN3
+					 * common.  uputc() is in CODE2, so tty_read
+					 * (CODE1) bank-bounces for every byte; after
+					 * ioctl that bounce was implicated in
+					 * RST38@C000 (FF hole below PROGTOP).
+					 * Write common destinations directly.
+					 */
+					if ((uint16_t)(uarg_t)udata.u_base >= 0xC000U)
+						*(uint8_t *)udata.u_base = c;
+					else
+						uputc(c, udata.u_base);
+#else
 					uputc(c, udata.u_base);
+#endif
+				}
 				break;
 			}
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			spr_rw_stage = 0xB3;
+#endif
 			if (!(t->termios.c_lflag & ICANON)) {
 			        uint_fast8_t n = t->termios.c_cc[VTIME];
 
@@ -80,6 +115,9 @@ int tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 			                ptimer_insert();
 				}
                         }
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+			spr_rw_stage = 0xB4;
+#endif
 			if (psleep_flags_io(q, flag))
 			        goto out;
                         /* timer expired */

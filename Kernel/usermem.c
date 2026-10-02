@@ -118,18 +118,22 @@ int uputc(uint16_t value,  void *user)
 	return _uputc(value,user);
 }
 
+#ifndef CONFIG_SPRINTER_EARLY_TRACE
 int uputw(uint16_t value, void *user)
 {
 	if (!valaddr_w(user, 2))
 		return -1;
 #ifdef MISALIGNED
-	if (MISALIGNED(user, 2)) }
+	if (MISALIGNED(user, 2)) {
 		ssig(udata.u_proc, SIGBUS);
 		return -1;
 	}
 #endif
 	return _uputw(value,user);
 }
+#else
+/* Sprinter: _uputw is provided in platform-sprinter/usermem.s common. */
+#endif
 
 int uzero(void *user, usize_t count)
 {

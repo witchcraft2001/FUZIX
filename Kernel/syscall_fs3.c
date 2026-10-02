@@ -255,25 +255,25 @@ arg_t _open(void)
 	spr_rw_count = ino->c_magic;
 	spr_rw_mode = ino->c_dev;
 	spr_rw_dev = ino->c_num;
-	sprinter_dbg[24] = 0xA1;
-	sprinter_dbg[25] = (uint8_t)(uarg_t)ino;
-	sprinter_dbg[26] = (uint8_t)(((uarg_t)ino) >> 8);
-	sprinter_dbg[27] = (uint8_t)ino->c_magic;
-	sprinter_dbg[28] = (uint8_t)(ino->c_magic >> 8);
-	sprinter_dbg[29] = (uint8_t)ino->c_dev;
-	sprinter_dbg[30] = (uint8_t)(ino->c_dev >> 8);
+	sprinter_dbg[8] = 0xA1;
+	sprinter_dbg[9] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[10] = (uint8_t)(((uarg_t)ino) >> 8);
+	sprinter_dbg[11] = (uint8_t)ino->c_magic;
+	sprinter_dbg[12] = (uint8_t)(ino->c_magic >> 8);
+	sprinter_dbg[13] = (uint8_t)ino->c_dev;
+	sprinter_dbg[14] = (uint8_t)(ino->c_dev >> 8);
 #endif
 
 	i_unlock(ino);
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[24] = 0xA4;
-	sprinter_dbg[25] = (uint8_t)(uarg_t)ino;
-	sprinter_dbg[26] = (uint8_t)(((uarg_t)ino) >> 8);
-	sprinter_dbg[27] = (uint8_t)ino->c_magic;
-	sprinter_dbg[28] = (uint8_t)(ino->c_magic >> 8);
-	sprinter_dbg[29] = (uint8_t)ino->c_dev;
-	sprinter_dbg[30] = (uint8_t)(ino->c_dev >> 8);
+	sprinter_dbg[8] = 0xA4;
+	sprinter_dbg[9] = (uint8_t)(uarg_t)ino;
+	sprinter_dbg[10] = (uint8_t)(((uarg_t)ino) >> 8);
+	sprinter_dbg[11] = (uint8_t)ino->c_magic;
+	sprinter_dbg[12] = (uint8_t)(ino->c_magic >> 8);
+	sprinter_dbg[13] = (uint8_t)ino->c_dev;
+	sprinter_dbg[14] = (uint8_t)(ino->c_dev >> 8);
 	spr_rw_stage = 0xB4;
 	spr_rw_base = (uint16_t)(uarg_t)ino;
 	spr_rw_count = ino->c_magic;

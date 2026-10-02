@@ -83,6 +83,11 @@
 	.globl _spr_sysarg_sp
 	.globl _sprinter_last_exec_ptab
 	.globl _spr_rw_stage
+	.globl _spr_rw_fd
+	.globl _spr_rw_access
+	.globl _sprinter_dbg
+	.globl _sprinter_bringup_noei
+	.globl _spr_doexec_count
 	.globl _ptab
 	.globl mpgsel_cache
         .globl _unix_syscall
@@ -309,8 +314,15 @@ syscall_pages_ok:
 	ld a, (mpgsel_cache + 2)
 	ld (_spr_sys_enter_pp2), a
 
-        ; re-enable interrupts
+	; re-enable interrupts — except after execve("/bin/sh"), where
+	; _sprinter_bringup_noei is set.  An IRQ mid-banked ioctl left
+	; CODE3 mapped and the next fetch at 0x6480 executed the
+	; displacement byte of `ld h,(ix-1)` as RST 38 (ret=6481).
+	ld a, (_sprinter_bringup_noei)
+	or a
+	jr nz, syscall_keep_di
         ei
+syscall_keep_di:
 
         ; now pass control to C
 	push af
@@ -434,6 +446,20 @@ spr_fix_upage:
 spr_upage_ok:
 	call map_proc_always
 
+	; After /bin/sh, re-install JP unix at user 0x0000.  sbrk / user
+	; writes have been seen to smash the vector (BA BA DE DE) and the
+	; next libc `call 0` then wanders.  User WIN0 is live here.
+	ld a, (_sprinter_bringup_noei)
+	or a
+	jr z, spr_vec_ok
+	push hl
+	ld a, #0xC3
+	ld (0x0000), a
+	ld hl, #unix_syscall_entry
+	ld (0x0001), hl
+	pop hl
+spr_vec_ok:
+
 	xor a
 	ld (_udata + U_DATA__U_INSYS), a
 
@@ -441,23 +467,23 @@ spr_upage_ok:
 	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 
 	;
-	; Sprinter bring-up: write() can leave a stale EEXIST in u_error
-	; even after the tty path printed and cleared it (dbg8=0, stage C2).
-	; Only force-clear when the early-trace tty write path completed
-	; (spr_rw_stage == 0xC2); do not mask real partial-write errors.
+	; Sprinter bring-up: write() can leave a stale ENOENT/EMFILE in
+	; u_error even after tty writei transferred bytes (u_done>0).
+	; dbg[0]==0xBC is too sticky-fragile (later probes overwrite it).
+	; Key off u_done != 0 for callno==write instead.
 	; Also reload u_retval from u_done — the banked dispatch stub has
 	; been observed returning HL=0 after a successful writei/cdwrite.
 	;
 	ld a, (_udata + U_DATA__U_CALLNO)
 	cp #8			; write
 	jr nz, spr_err_keep
-	ld a, (_spr_rw_stage)
-	cp #0xC2
-	jr nz, spr_err_keep
-	ld hl, #0
-	ld (_udata + U_DATA__U_ERROR), hl
-	ld (_spr_sys_exit_err), hl
 	ld hl, (_udata + 0x9F)	; u_done (SDCC layout; not in kernel.def)
+	ld a, h
+	or l
+	jr z, spr_err_keep
+	ld de, #0
+	ld (_udata + U_DATA__U_ERROR), de
+	ld (_spr_sys_exit_err), de
 	ld (_udata + U_DATA__U_RETVAL), hl
 spr_err_keep:
 
@@ -496,8 +522,25 @@ unix_pop:
         pop de
         pop bc
         exx
+	; Sprinter bring-up: after execve("/bin/sh") keep IFF1 clear on
+	; the way out.  A post-return IRQ while PC is briefly wrong (or
+	; while user code has not yet `di`) has been observed vectoring
+	; into the FONT 0xFF hole at E6xx (RST38, ret=E607).
+	;
+	; Preserve carry across the noei test: `or a` clears it, and with
+	; carry lost __syscall treats HL=u_error as success.  V7 setbrk
+	; then memset()s from that small pointer for a huge length and
+	; wipes user page0 (PROGLOAD) right after the first failing sbrk.
+	push af
+	ld a, (_sprinter_bringup_noei)
+	or a
+	jr nz, unix_pop_noei
+	pop af
         ei
-	 ret ; must immediately follow EI
+        ret ; must immediately follow EI
+unix_pop_noei:
+	pop af
+        ret
 
 
 via_signal:
@@ -540,6 +583,15 @@ via_signal_restore:
 ;
 _doexec:
         di
+	; If this is the second+ exec (/bin/sh), arm noei BEFORE
+	; map_proc_always so map_apply_cached reinstalls user vectors
+	; on the new pages (one-shot seen=2 already burned on /init).
+	ld a, (_spr_doexec_count)
+	cp #1
+	jr c, doexec_map
+	ld a, #1
+	ld (_sprinter_bringup_noei), a
+doexec_map:
         call map_proc_always
 
         pop bc ; return address
@@ -561,6 +613,37 @@ _doexec:
 	; we can generate this from the start address
 	ld d,h
 	ld e,#0
+	; If the platform already applied the reloc stream, pass DE=0
+	; so crt0 finds a zeroed stream head and skips the patch loop.
+	; That keeps sys_stubs (installed after kernel reloc) intact.
+	.globl _spr_reloc_done
+	ld a, (_spr_reloc_done)
+	or a
+	jr z, doexec_de_base
+	ld d, #0
+	ld e, #0
+doexec_de_base:
+	; Sprinter: one-byte "reached user jp" marker (kept tiny for COMMON).
+	ld a, #0xDD
+	ld (_sprinter_dbg + 15), a
+	; Count doexec entries; from the second (/bin/sh) onward ask
+	; unix_pop to skip ei (see _sprinter_bringup_noei) and retarget
+	; user 0x0000 to unix (program_vectors left null_stub).  Must
+	; preserve HL — it holds the user entry for jp (hl) below.
+	ld a, (_spr_doexec_count)
+	inc a
+	ld (_spr_doexec_count), a
+	cp #2
+	jr c, doexec_jp
+	ld a, #1
+	ld (_sprinter_bringup_noei), a
+	push hl
+	ld a, #0xC3
+	ld (0x0000), a
+	ld hl, #unix_syscall_entry
+	ld (0x0001), hl
+	pop hl
+doexec_jp:
 	        jp (hl)
 
 ;

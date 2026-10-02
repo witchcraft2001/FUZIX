@@ -10,3 +10,8 @@ disable-pkg platform-sprinter
 # smash the low-page vectors (the old 0x0000-base build wrote into 0x00xx).
 r /init
 f 0755 /init          ../../../Applications/util/sprinit_raw
+
+# Bring-up /bin/sh: stock V7 sh via geometric bounce + spr_uput_win0.
+# (Synth open uses FS blks 1057-1075; pkg path is best-effort.)
+r /bin/sh
+f 0755 /bin/sh        ../../../Applications/V7/cmd/sh/sh

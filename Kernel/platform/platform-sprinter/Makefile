@@ -4,15 +4,18 @@ DISCARD_CSRCS = discard.c
 DISCARD_DSRCS = ../../dev/tinyide_discard.c
 DSRCS = ../../dev/tinyide.c ../../dev/tinydisk_discard.c ../../dev/tinydisk.c
 C3SRCS = devtty.c
+# Bounce shares CODE3 with __execve: direct call, no bank stub.
+C4SRCS = execbounce.c
 
 AOBJS = $(ASRCS:.s=.rel)
 COBJS = $(CSRCS:.c=.rel)
 C3OBJS = $(C3SRCS:.c=.rel)
+C4OBJS = $(C4SRCS:.c=.rel)
 DISCARD_COBJS = $(DISCARD_CSRCS:.c=.rel)
 DISCARD_DOBJS = $(patsubst ../../dev/%.c,%.rel, $(DISCARD_DSRCS))
 DOBJS = $(patsubst ../../dev/%.c,%.rel, $(DSRCS))
 
-OBJS  = $(AOBJS) $(COBJS) $(C3OBJS) $(DOBJS) $(DISCARD_DOBJS) $(DISCARD_COBJS)
+OBJS  = $(AOBJS) $(COBJS) $(C3OBJS) $(C4OBJS) $(DOBJS) $(DISCARD_DOBJS) $(DISCARD_COBJS)
 
 CROSS_CCOPTS += -I../../dev/
 
@@ -28,6 +31,9 @@ $(COBJS): %.rel: %.c
 
 $(C3OBJS): %.rel: %.c
 	$(CROSS_CC) $(CROSS_CCOPTS) $(CROSS_CC_SEG3) -c $<
+
+$(C4OBJS): %.rel: %.c
+	$(CROSS_CC) $(CROSS_CCOPTS) $(CROSS_CC_SEG4) -c $<
 
 $(DOBJS): %.rel: ../../dev/%.c
 	$(CROSS_CC) $(CROSS_CCOPTS) $(CROSS_CC_SEG2) -c $<

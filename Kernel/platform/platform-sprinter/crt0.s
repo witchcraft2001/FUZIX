@@ -229,3 +229,22 @@ _bufpool:
 
 _sprinter_ide_bounce:
 	.ds 256
+
+; Sector bounce for PID1 execve body load (kernel→user). Keep next to
+; the IDE bounce so large execs do not fight the 5-buffer cache path.
+	.globl _sprinter_exec_bounce
+	.globl _sprinter_exec_ind
+	.globl _sprinter_exec_tmp
+
+_sprinter_exec_bounce:
+	.ds 2048
+
+; Single-indirect cache for PID1 geometric bounce (WIN0).  Only touch
+; while MPGSEL_0 is kernel page 0x48.
+_sprinter_exec_ind:
+	.ds 512
+
+; left/got/foff/n for execbounce — must live in WIN0, not CODE3 data
+; (bank overlays) or a coalesced IX slot with fsblk.
+_sprinter_exec_tmp:
+	.ds 8

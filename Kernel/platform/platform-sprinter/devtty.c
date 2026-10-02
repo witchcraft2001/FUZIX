@@ -314,18 +314,18 @@ void kbd_poll(void)
 
 void tty_putc(uint_fast8_t minor, uint_fast8_t c)
 {
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xE0;
-	sprinter_dbg[16] = (uint8_t)minor;
-	sprinter_dbg[17] = c;
-#endif
 	minor;
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xE1;
-#endif
+	/*
+	 * After execve, vtoutput() (CODE3) has been seen to RST38 with
+	 * ret into the user-stack hole (~0xE6xx) while callno=write.
+	 * sprinit dual-write worked pre-exec; post-exec the CODE3 overlay
+	 * is not reliable yet.  Mirror kputchar: plot via WIN0 helpers.
+	 */
+	sprinter_early_kputc(c);
+	return;
+#else
 	vtoutput(&c, 1);
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	sprinter_dbg[15] = 0xE2;
 #endif
 }
 

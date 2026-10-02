@@ -36,6 +36,10 @@
 	.globl _sprinter_force_bank1
 	.globl _dev_tab
 	.globl _int_disabled
+	.globl _sprinter_bringup_noei
+	.globl _spr_doexec_count
+	.globl _sprinter_psleep_tty_ei
+	.globl _sprinter_psleep_maybe_ei
 	.globl _sprinter_trace_last
 		.globl _sprinter_nullh_count
 		.globl _sprinter_null_sp0
@@ -322,32 +326,25 @@ clscol:
 
 	; Set up IM2 interrupt vectors.
 	;
-	; I=0xFF, table at 0xFF00 filled with 0xFD → every IM2 fetch
-	; resolves to 0xFFFD (not 0xFDFD!).  The bring-up JP stub MUST
-	; live at 0xFFFD inside _VECTORS.
-	;
-	; Historical bug: installing the stub at 0xFDFD corrupted
-	; __uget (call user_map_de is CD B6 FC spanning FDFB..FDFD);
-	; first write() then called into discard at C3B6 and hit RST38.
-	;
-	; Keep _COMMONDATA below 0xFF00 so the vector page stays clean.
-	; Note: vector low=0xFF would wrap through 0x0000; bring-up
-	; CTC/SIO vectors never emit 0xFF.
-	ld hl, #0xFF00
-	ld de, #0xFF01
-	ld bc, #255
-	ld (hl), #0xFD
+	; WIN3 is always mapped, with discard starting at C300. Reserve
+	; C000..C100 for all 257 vector bytes and C1C1..C1C3 for the JP.
+	; External IRQ supplies FF, so an FF00 table would wrap into WIN0.
+	; Repeated C1 bytes resolve to C1C1 for both odd and even vectors.
+	ld hl, #0xC000
+	ld de, #0xC001
+	ld bc, #256
+	ld (hl), #0xC1
 	ldir
 
 	; Minimal bring-up IRQ stub (reti, leave IFF1 clear) — not the
 	; FUZIX interrupt_handler, whose exit clears _int_disabled and
 	; ei's into an IRQ storm on Sprinter FRAME/CTC.
 	ld a, #0xC3			; JP instruction
-	ld (0xFFFD), a
+	ld (0xC1C1), a
 	ld hl, #sprinter_bringup_int
-	ld (0xFFFE), hl
+	ld (0xC1C2), hl
 
-	ld a, #0xFF
+	ld a, #0xC0
 	ld i, a
 	im 2
 
@@ -377,63 +374,62 @@ _plt_reboot:
 	pop af
 	inc sp
 	di
-	; Capture caller return address from stack (who entered reboot/monitor).
+	; Death frame in dbg[0..15] (must not be wiped by later capture):
+	;  0..1  caller RA
+	;  2..3  panic_ptr
+	;  4     callno
+	;  5     insys
+	;  6..8  u_page[0..2]
+	;  9..11 mpgsel[0..2]
+	;  12..13 u_error
+	;  14..15 SP
 	ld hl, #0
 	add hl, sp
 	ld a, (hl)
+	ld (_sprinter_dbg + 0), a
+	inc hl
+	ld a, (hl)
+	ld (_sprinter_dbg + 1), a
+	ld hl, (_sprinter_last_panic_ptr)
+	ld a, l
+	ld (_sprinter_dbg + 2), a
+	ld a, h
+	ld (_sprinter_dbg + 3), a
+	ld a, (_udata + U_DATA__U_CALLNO)
+	ld (_sprinter_dbg + 4), a
+	ld a, (_udata + U_DATA__U_INSYS)
+	ld (_sprinter_dbg + 5), a
+	ld a, (_udata + U_DATA__U_PAGE)
+	ld (_sprinter_dbg + 6), a
+	ld a, (_udata + U_DATA__U_PAGE + 1)
+	ld (_sprinter_dbg + 7), a
+	ld a, (_udata + U_DATA__U_PAGE + 2)
 	ld (_sprinter_dbg + 8), a
-	inc hl
-	ld a, (hl)
+	ld a, (mpgsel_cache)
 	ld (_sprinter_dbg + 9), a
-	inc hl
-	ld a, (hl)
+	ld a, (mpgsel_cache + 1)
 	ld (_sprinter_dbg + 10), a
-	inc hl
-	ld a, (hl)
+	ld a, (mpgsel_cache + 2)
 	ld (_sprinter_dbg + 11), a
+	ld hl, (_udata + U_DATA__U_ERROR)
+	ld a, l
+	ld (_sprinter_dbg + 12), a
+	ld a, h
+	ld (_sprinter_dbg + 13), a
+	ld hl, #0
+	add hl, sp
+	ld a, l
+	ld (_sprinter_dbg + 14), a
+	ld a, h
+	ld (_sprinter_dbg + 15), a
 	ld hl, (_sprinter_last_panic_ptr)
 	ld a, h
 	or l
-	jr nz, plt_monitor_capture
-	; Bring-up: if monitor was not entered from panic(), do not hard
-	; stop here. Return so the next failure can surface.
+	jr nz, plt_monitor_hang
+	; Non-panic monitor entry (e.g. unexpected switchin return path
+	; used to call here): keep the death frame and return so bring-up
+	; can continue to the next real failure.
 	ret
-
-plt_monitor_capture:
-	ld hl, #0x0155
-	ld de, #_sprinter_dbg
-	ld bc, #0x000E
-	ldir
-	ld hl, #_dev_tab + 0x0014
-	ld a, (hl)
-	ld (_sprinter_dbg + 14), a
-	inc hl
-	ld a, (hl)
-	ld (_sprinter_dbg + 15), a
-	ld hl, #_dev_tab
-	ld a, (hl)
-	ld (_sprinter_dbg + 16), a
-	inc hl
-	ld a, (hl)
-	ld (_sprinter_dbg + 17), a
-	ld hl, #_dev_tab + 0x0004
-	ld a, (hl)
-	ld (_sprinter_dbg + 18), a
-	inc hl
-	ld a, (hl)
-	ld (_sprinter_dbg + 19), a
-	ld hl, #_dev_tab + 0x0008
-	ld a, (hl)
-	ld (_sprinter_dbg + 20), a
-	inc hl
-	ld a, (hl)
-	ld (_sprinter_dbg + 21), a
-	ld hl, #_td_op
-	ld a, (hl)
-	ld (_sprinter_dbg + 22), a
-	inc hl
-	ld a, (hl)
-	ld (_sprinter_dbg + 23), a
 plt_monitor_hang:
 	halt
 	jr plt_monitor_hang
@@ -445,7 +441,7 @@ plt_interrupt_all:
 ; sprinter_bringup_int - minimal IRQ stub used during platform bring-up.
 ;
 ; Any IM2 vector (CTC, SIO, ULA FRAME, ISA, etc) is routed here via the
-; table at 0xFF00 (I=0xFF, fill 0xFD → stub at 0xFFFD).  We acknowledge
+; table at C000..C100 (I=C0, fill C1 → stub at C1C1).  We acknowledge
 ; the interrupt with `reti` but leave IFF1 cleared so the kernel stays
 ; in its post-`di` state.  This is a workaround for FUZIX's core
 ; interrupt_handler exit which always clears _int_disabled and `ei`s --
@@ -457,6 +453,9 @@ sprinter_bringup_int:
 	; Bring-up safety mode: absorb all IM2 IRQs unconditionally.
 	; We still mark interrupts as disabled in common state so any code
 	; sampling _int_disabled stays consistent with the hardware IFF1=0.
+	; Note: on IRQ accept the CPU clears IFF1+IFF2, so RETI leaves
+	; IFF1 clear — but only if nothing re-EI'd afterward.  tty waits
+	; must not EI while _sprinter_bringup_noei is set (see below).
 	push af
 	push hl
 	ld hl, #_int_disabled
@@ -464,6 +463,29 @@ sprinter_bringup_int:
 	pop hl
 	pop af
 	reti
+
+;=========================================================================
+; sprinter_psleep_tty_ei / sprinter_psleep_maybe_ei
+;
+; EI gates for core do_psleep (EARLY_TRACE) PID1 tty busy-poll.
+; Live in COMMONMEM so banked C never samples _sprinter_bringup_noei
+; (that previously regressed /init).  kbd_poll / timer_interrupt stay
+; as C calls from process.c — they are banked (CODE3 / CODE1) and need
+; SDCC bank stubs; a raw CALL from here would hit the wrong overlay.
+;
+;   tty_ei:   EI only when !bringup_noei (before poll)
+;   maybe_ei: same, after clearing p_wait (matches unix_pop skip)
+;
+; zxevo can HALT under a real interrupt_handler; Sprinter still uses
+; the absorber above, so EI during sh console read walks into FONT.
+;=========================================================================
+_sprinter_psleep_tty_ei:
+_sprinter_psleep_maybe_ei:
+	ld a, (_sprinter_bringup_noei)
+	or a
+	ret nz
+	ei
+	ret
 
 ;=========================================================================
 ; sprinter_rst38_stub - fatal RST 38 / IM1 trap logger.
@@ -519,33 +541,8 @@ sprinter_rst38_stub:
 		ld d, (hl)
 		ld a, d
 		ld (_sprinter_rst38_ret + 1), a
-		dec hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 16), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 17), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 18), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 19), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 20), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 21), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 22), a
-		inc hl
-		ld a, (hl)
-		ld (_sprinter_dbg + 23), a
-		ld hl, #0
-		add hl, sp
-		inc hl
+		; Keep the rest of the frame in dedicated rst38_* latches only —
+		; dbg[] is capped at 16 bytes for the IM2 COMMONDATA ceiling.
 		ld a, (_udata + U_DATA__U_INSYS)
 		ld (_sprinter_rst38_insys), a
 		ld a, (_udata + U_DATA__U_CALLNO)
@@ -605,53 +602,33 @@ sprinter_nmi_stub:
         .globl _sprinter_nmi_count
 
 ;=========================================================================
-; sprinter_null_stub - NULL-vector fatal trap for early userspace.
+; sprinter_null_stub - NULL-vector trap / libc __syscall bring-up fix.
 ;
-; Keep this path minimally invasive and stack-agnostic.
-; We occasionally hit this stub with an already-corrupted SP while still in
-; kernel mapping.  Do not push/pop here.  Latch context bytes first, then
-; stop in a local hang loop.  Never tail-chain into syscall entry: treating
-; a NULL jump as a syscall corrupts control flow and masks the real fault.
+; Stock Z80 libc does `call __text` from __syscall.  relocbin is supposed
+; to turn that into `call PROGLOAD` (sys_stubs).  Some user binaries
+; (notably /bin/sh) ship a reloc stream that never patches this site, so
+; the call remains `CD 00 00` and the first brk() lands here.
+;
+; Detect that pattern (return address points at `ret nc` / 0xD0, call
+; site is still `CD xx 00`) and tail into unix_syscall_entry with A still
+; holding the syscall number.  Real NULL jumps still hang.
 ;=========================================================================
 sprinter_null_stub:
+	; Kernel 0x0000 and user 0x002C land here.  User 0x0000 is retargeted
+	; to unix_syscall_entry on doexec map-apply for libc `call 0`.
 	ld hl, #_sprinter_nullh_count
 	inc (hl)
-	ld (_sprinter_dbg + 16), a
+	ld a, l
+	ld (_sprinter_dbg + 12), a
+	ld a, h
+	ld (_sprinter_dbg + 13), a
 	ld hl, #0
 	add hl, sp
-	ld a, l
-	ld (_sprinter_dbg + 17), a
-	ld a, h
-	ld (_sprinter_dbg + 18), a
 	ld a, (hl)
-	ld (_sprinter_dbg + 19), a
+	ld (_sprinter_dbg + 14), a
 	inc hl
 	ld a, (hl)
-	ld (_sprinter_dbg + 20), a
-	ld a, (mpgsel_cache)
-	ld (_sprinter_dbg + 21), a
-	ld hl, #_kernel_pages
-	cp (hl)
-	jr nz, null_user_chain
-	ld a, (mpgsel_cache + 1)
-	ld (_sprinter_dbg + 22), a
-	inc hl
-	cp (hl)
-	jr nz, null_user_chain
-	ld a, (mpgsel_cache + 2)
-	ld (_sprinter_dbg + 23), a
-	inc hl
-	cp (hl)
-	jr z, null_hang
-null_user_chain:
-	ld a, (0x0000)
-	ld (_sprinter_dbg + 21), a
-	ld a, (0x0001)
-	ld (_sprinter_dbg + 22), a
-	ld a, (0x0002)
-	ld (_sprinter_dbg + 23), a
-	ld a, #0x6C
-	ld (_sprinter_dbg + 16), a
+	ld (_sprinter_dbg + 15), a
 null_hang:
 	halt
 	jr null_hang
@@ -870,11 +847,9 @@ do_program_vectors:
 	ld hl, #unix_syscall_entry
 	ld (0x0031), hl
 
-	; null trap at 0x0000
+	; null trap at 0x0000 (kernel pages).  User doexec map-apply
+	; retargets this to unix_syscall_entry for libc `call 0`.
 	ld (0x0000), a
-	; Keep NULL-vector faults fatal and local to sprinter_null_stub.
-	; Routing this through unix_syscall_entry turns a bad jump into
-	; a random syscall stream and corrupts later kernel state.
 	ld hl, #sprinter_null_stub
 	ld (0x0001), hl
 
@@ -912,7 +887,15 @@ map_apply_cached:
 	out (MPGSEL_2), a
 	ld a, (_spr_doexec_seen)
 	cp #1
-	jr nz, map_apply_cached_done
+	jr z, map_apply_vecs_oneshot
+	; After /bin/sh, re-install low vectors on every user map.
+	; User code / failed opens have been seen to leave 0x0000 as
+	; BA BA and 0x0038 as FF (RST38 stack-eat loop).
+	ld a, (_sprinter_bringup_noei)
+	or a
+	jr z, map_apply_cached_done
+	jr map_apply_install_vecs
+map_apply_vecs_oneshot:
 	ld a, #2
 	ld (_spr_doexec_seen), a
 	ld a, (mpgsel_cache)
@@ -921,6 +904,27 @@ map_apply_cached:
 	ld (_spr_doexec_m1), a
 	ld a, (mpgsel_cache + 2)
 	ld (_spr_doexec_m2), a
+map_apply_install_vecs:
+	; User WIN0 is live: re-install vectors.  Syscall site rewrite is
+	; done from C (sprinter_patch_syscalls) before doexec — a full
+	; [PROGLOAD..u_break) walk here hung V7 (~30KB) before _doexec.
+	; libc `call 0` must reach unix_syscall_entry (null_stub here
+	; hung /bin/sh at null_hang after ioctl/read once C000 was fixed).
+	; /bin/sh refreshes unix@0 again from _doexec when noei is set
+	; (program_vectors may have put null_stub back after this shot).
+	ld a, #0xC3
+	ld (0x0000), a
+	ld hl, #unix_syscall_entry
+	ld (0x0001), hl
+	ld (0x002C), a
+	ld hl, #sprinter_null_stub
+	ld (0x002D), hl
+	ld (0x0030), a
+	ld hl, #unix_syscall_entry
+	ld (0x0031), hl
+	ld (0x0038), a
+	ld hl, #sprinter_rst38_stub
+	ld (0x0039), hl
 map_apply_cached_done:
 	ret
 
@@ -1027,8 +1031,11 @@ pv_b2_ok:
 	ld hl, #unix_syscall_entry
 	ld (0x0031), hl
 
+	; Trap true NULL jumps while user page 0 is mapped.  libc `call 0`
+	; is retargeted to unix_syscall_entry in map_apply_cached (once
+	; per doexec).  Installing the syscall entry here too raced with
+	; early /init dup/IDE and hung in null_stub under kernel map.
 	ld (0x0000), a
-	; Keep NULL-vector faults fatal and local to sprinter_null_stub.
 	ld hl, #sprinter_null_stub
 	ld (0x0001), hl
 
@@ -1113,10 +1120,6 @@ map_proc_always_probe_mark:
 	inc hl
 	ld d, (hl)
 	ld (_spr_doexec_call_ra0), de
-	ld a, e
-	ld (_sprinter_dbg + 20), a
-	ld a, d
-	ld (_sprinter_dbg + 21), a
 	inc hl
 	ld e, (hl)
 	inc hl
@@ -1132,11 +1135,7 @@ map_proc_always_probe_mark:
 	inc hl
 	ld d, (hl)
 	ld (_spr_doexec_call_start), de
-	; Read-only probe: mirror observed start word, do not patch caller stack.
-	ld a, e
-	ld (_sprinter_dbg + 22), a
-	ld a, d
-	ld (_sprinter_dbg + 23), a
+	; start word already in _spr_doexec_call_*; keep dbg[] ≤16 for IM2.
 map_proc_always_probe_done:
 	pop de
 	pop af
@@ -1153,7 +1152,10 @@ map_proc_di:
 	ld a, h
 	or l				; HL == 0?
 	jp z, map_kernel		; common implementation
-	; fall through to map_proc_2
+	; Historically fell into force_bank1 (not map_proc_2).  Restoring
+	; that until map_proc callers are audited — jp map_proc_2 zeroed
+	; kernel_pages WIN1/2 during bring-up.
+	; fall through
 
 _sprinter_force_bank1:
 	ld bc, #MAP_BANK1
@@ -1713,6 +1715,7 @@ bank0:
 	cp #BANK2
 	jr z, retbank2
 	call callhl
+	; BANK3 and unknown: restore CODE3 (bounce/execve home).
 	ld bc, #MAP_BANK3
 banksetbc:
 	call sanitize_bc_map
@@ -1809,8 +1812,11 @@ __stub_2_3:
 stub_call:
 	pop hl
 	ex (sp), hl
-	ld a, (_kernel_pages+1)
 	call sanitize_bc_map
+	; COMMONMEM, stack in WIN3: switch WIN1/2 with BC, preserving
+	; IRQ state.  Classify the caller before the callee clobbers BC;
+	; sanitize_bc_map also destroys A, so read the caller bank after it.
+	ld a, (_kernel_pages+1)
 	ld (_kernel_pages+1), bc
 	ld (mpgsel_cache + 1), bc
 	ld b, a
@@ -1822,13 +1828,13 @@ stub_call:
 	ld a, b
 	cp #BANK1
 	jr z, stub_ret_1
-	call callhl
-	ld a, b
 	cp #BANK2
 	jr z, stub_ret_2
+	call callhl
 	ld bc, #MAP_BANK3
 	jr stub_ret
 stub_ret_2:
+	call callhl
 	ld bc, #MAP_BANK2
 stub_ret:
 	call sanitize_bc_map
@@ -1906,7 +1912,7 @@ set_mpgsel2_ok:
 	.area _COMMONMEM
 
 _spr_initmsg:
-		.db 'S','t','a','r','t','i','n','g',' ','/','i','n','i','t',' ','[','6','C',']',0x0A,0
+		.db 'i','n','i','t',0x0A,0
 
 _spr_common_init_path:
 		.db '/','i','n','i','t',0
@@ -1917,6 +1923,13 @@ _spr_common_init_argv:
 
 _spr_common_init_envp:
 		.dw 0
+
+; Set by sprinter_apply_user_reloc() after kernel-side reloc of a
+; FUZIX z80_rel binary.  _doexec then passes DE=0 so crt0's reloc loop
+; is a no-op (stream already consumed) and cannot re-patch sys_stubs.
+	.globl _spr_reloc_done
+_spr_reloc_done:
+		.db 0
 
 ; n_open walk pointers — must stay in common (WIN3), not WIN0 DATA.
 _spr_nopen_name:
@@ -1935,66 +1948,21 @@ _mpgsel_cache:
 mpgsel_cache:
 	.db 0, 0, 0, 0		; cached page numbers for all 4 windows
 
-top_bank:
-	.db 0x4B			; current top bank (common) page
-
 _kernel_pages:
 	.db 0x48, 0x49, 0x4A, 0x4B	; kernel page assignments
+
+; top_bank tracks MPGSEL_3 — share kernel_pages[3] (saves 1B for IM2 ceiling).
+top_bank		.equ _kernel_pages + 3
 
 ;
 ; Keep early fatal diagnostics below 0xFC00 so replay dumps around trap
 ; stubs and the top common page stay easy to compare across iterations.
 ;
-_sprinter_last_validchk_dev:
-	.dw 0			; last dev rejected by validchk()
-
-_sprinter_last_validchk_site:
-	.dw 0			; caller string pointer passed to validchk()
-
-_sprinter_last_panic_ptr:
-	.dw 0			; last panic() deathcry pointer
-
-_sprinter_last_panic_bytes:
-	.ds 4			; first 4 bytes at deathcry pointer
-
 _sprinter_rst38_count:
 	.db 0			; count of fatal hits to the 0x0038 vector
 
-_sprinter_rst38_sp:
-	.dw 0			; SP seen on entry to sprinter_rst38_stub
-
 _sprinter_rst38_ret:
 	.dw 0			; return address fetched from the RST 38 stack frame
-
-_sprinter_rst38_insys:
-	.db 0			; udata.u_insys at RST 38 hit
-
-_sprinter_rst38_callno:
-	.db 0			; udata.u_callno at RST 38 hit
-
-_sprinter_rst38_inirq:
-	.db 0			; udata.u_ininterrupt at RST 38 hit
-
-_sprinter_rst38_up0:
-	.db 0			; udata.u_page[0] at RST 38 hit
-
-_sprinter_rst38_up1:
-	.db 0			; udata.u_page[1] at RST 38 hit
-
-_sprinter_rst38_up2:
-	.db 0			; udata.u_page[2] at RST 38 hit
-
-_sprinter_rst38_mp0:
-	.db 0			; mpgsel_cache[0] at RST 38 hit
-
-_sprinter_rst38_mp1:
-	.db 0			; mpgsel_cache[1] at RST 38 hit
-
-_sprinter_rst38_mp2:
-	.db 0			; mpgsel_cache[2] at RST 38 hit
-
-_sprinter_rst38_i:
-	.db 0			; I register at RST 38 hit
 
 map_savearea:
 	.db 0, 0, 0, 0		; saved mapping
@@ -2005,20 +1973,23 @@ map_savearea_user:
 _int_disabled:
 	.db 1
 
-_sprinter_trace_last:
+; 0 at boot so sprinit write returns use stock ei.
+; _doexec sets this on the second+ exec (/bin/sh); unix_pop skips ei.
+_sprinter_bringup_noei:
 	.db 0
 
-_sprinter_nmi_count:
+_spr_doexec_count:
 	.db 0
 
-_sprinter_nullh_count:
+; Real bytes (not aliased onto sys exit probes or dbg[]): map_apply
+; one-shot and doexec arming depend on these surviving other syscalls.
+_spr_doexec_arm:
+	.db 0
+_spr_doexec_seen:
 	.db 0
 
-_sprinter_null_sp0:
-	.dw 0			; word at SP on NULL-vector entry
-
-_sprinter_null_sp2:
-	.dw 0			; word at SP+2 on NULL-vector entry
+; nullh aliases exec_diag tail (saves 1B).
+_sprinter_nullh_count	.equ _spr_exec_diag + 15
 
 ;
 ; Exec / i_deref bring-up latches collapsed into one scratch block.
@@ -2029,24 +2000,50 @@ _sprinter_null_sp2:
 _spr_exec_diag:
 	.ds 16
 
+; up*/mp*/I / nmi / panic_bytes / null_sp snapshots alias exec_diag —
+; frees storage so COMMONDATA ends ≤ 0xFF00 after sys_diag grew to 16
+; and doexec arm/seen regained real bytes.
+_sprinter_rst38_up0	.equ _spr_exec_diag + 0
+_sprinter_rst38_up1	.equ _spr_exec_diag + 1
+_sprinter_rst38_up2	.equ _spr_exec_diag + 2
+_sprinter_rst38_mp0	.equ _spr_exec_diag + 3
+_sprinter_rst38_mp1	.equ _spr_exec_diag + 4
+_sprinter_rst38_mp2	.equ _spr_exec_diag + 5
+_sprinter_rst38_i	.equ _spr_exec_diag + 6
+_sprinter_nmi_count	.equ _spr_exec_diag + 7
+_sprinter_last_panic_bytes	.equ _spr_exec_diag + 8
+_sprinter_last_validchk_dev	.equ _spr_exec_diag + 8
+_sprinter_last_validchk_site	.equ _spr_exec_diag + 8
+_sprinter_last_panic_ptr	.equ _spr_exec_diag + 10
+_sprinter_null_sp0		.equ _spr_exec_diag + 10
+_sprinter_rst38_sp		.equ _spr_exec_diag + 10
+_sprinter_rst38_insys		.equ _spr_exec_diag + 12
+_sprinter_rst38_callno		.equ _spr_exec_diag + 13
+_sprinter_null_sp2		.equ _spr_exec_diag + 12
+_sprinter_trace_last		.equ _spr_exec_diag + 14
+_sprinter_rst38_inirq		.equ _spr_exec_diag + 15
+
+; Layout matches C externs (stage u8, err/done/count u16).  Keep
+; last_exec_* inside this 16-byte block so they do not smash _spr_misc_diag.
 _sprinter_exec_fail_stage	.equ _spr_exec_diag + 0
 _sprinter_exec_fail_err	.equ _spr_exec_diag + 1
-_sprinter_exec_fail_name	.equ _spr_exec_diag + 3
-_sprinter_exec_fail_root	.equ _spr_exec_diag + 5
-_sprinter_exec_fail_cwd	.equ _spr_exec_diag + 7
-_sprinter_exec_fail_ino	.equ _spr_exec_diag + 9
-_sprinter_exec_fail_mode	.equ _spr_exec_diag + 11
-_sprinter_exec_fail_perm	.equ _spr_exec_diag + 13
-_sprinter_exec_fail_mflags	.equ _spr_exec_diag + 14
-_sprinter_exec_fail_argv	.equ _spr_exec_diag + 0
-_sprinter_exec_fail_envp	.equ _spr_exec_diag + 2
 _sprinter_exec_fail_done	.equ _spr_exec_diag + 4
 _sprinter_exec_fail_count	.equ _spr_exec_diag + 6
-_sprinter_last_exec_base	.equ _spr_exec_diag + 8
-_sprinter_last_exec_count	.equ _spr_exec_diag + 10
-_sprinter_last_exec_top	.equ _spr_exec_diag + 12
-_sprinter_last_exec_upage	.equ _spr_exec_diag + 0
-_sprinter_last_exec_ptab	.equ _spr_exec_diag + 4
+_sprinter_exec_fail_argv	.equ _spr_exec_diag + 8
+_sprinter_exec_fail_envp	.equ _spr_exec_diag + 10
+_sprinter_last_exec_base	.equ _spr_exec_diag + 12
+_sprinter_last_exec_count	.equ _spr_exec_diag + 14
+; Legacy aliases (bring-up probes; may overlap — prefer dbg[] for progress).
+_sprinter_exec_fail_name	.equ _spr_exec_diag + 3
+_sprinter_exec_fail_root	.equ _spr_exec_diag + 8
+_sprinter_exec_fail_cwd	.equ _spr_exec_diag + 10
+_sprinter_exec_fail_ino	.equ _spr_exec_diag + 12
+_sprinter_exec_fail_mode	.equ _spr_exec_diag + 14
+_sprinter_exec_fail_perm	.equ _spr_exec_diag + 3
+_sprinter_exec_fail_mflags	.equ _spr_exec_diag + 0
+_sprinter_last_exec_top	.equ _spr_exec_diag + 8
+_sprinter_last_exec_upage	.equ _spr_exec_diag + 10
+_sprinter_last_exec_ptab	.equ _spr_exec_diag + 12
 _sprinter_last_ideref_in	.equ _spr_exec_diag + 8
 _sprinter_last_ideref_post	.equ _spr_exec_diag + 10
 _sprinter_last_ideref_wr	.equ _spr_exec_diag + 12
@@ -2060,8 +2057,7 @@ _sprinter_last_wr_site	.equ _spr_exec_diag + 12
 ; Keep symbol ABI for existing probes but collapse storage into one scratch
 ; block so active diagnostics stay below the IM2 vector page (0xFF00).
 ;
-_spr_legacy_diag:
-	.ds 8
+_spr_legacy_diag	.equ _spr_misc_diag
 
 _sprinter_last_newfile_pino	.equ _spr_legacy_diag + 0
 _sprinter_last_newfile_nindex_in	.equ _spr_legacy_diag + 2
@@ -2111,220 +2107,105 @@ _spr_va_base	.equ _spr_legacy_diag + 3
 _spr_va_size	.equ _spr_legacy_diag + 5
 _spr_va_top	.equ _spr_legacy_diag + 3
 
-_sprinter_chlink_stage:
-	.db 0			; ch_link progress marker
-
-_sprinter_chlink_wd:
-	.dw 0			; ch_link wd pointer
-
-_sprinter_chlink_nindex:
-	.dw 0			; ch_link nindex pointer
-
-_sprinter_chlink_done:
-	.dw 0			; last u_done observed in ch_link
-
-_sprinter_chlink_error:
-	.dw 0			; last u_error observed in ch_link
-
-_sprinter_ideref_null_count:
-	.dw 0			; number of i_deref(NULL) calls
-
-_sprinter_ideref_null_sys:
-	.dw 0			; low=u_callno high=u_insys for last NULL deref
-
-_spr_gir:
-	.db 0			; 0=ok 1=bad oft index 2=bad of_tab inode ptr
-
-_spr_giu:
-	.db 0			; getinode() fd argument
-
-_spr_gio:
-	.db 0			; u_files[uindex] snapshot
-
-_spr_gifr:
-	.db 0			; of_tab[oftindex].o_refs snapshot
-
-_spr_gifa:
-	.db 0			; of_tab[oftindex].o_access snapshot
-
-_spr_giin:
-	.dw 0			; of_tab[oftindex].o_inode snapshot
-
-_spr_gis:
-	.dw 0			; low=u_callno high=u_insys in getinode
-
-_spr_gfcnt:
-	.dw 0			; count of getinode() validation failures
-
-_spr_gfr:
-	.db 0			; last failing reason (1 bad oft index, 2 bad inode ptr)
-
-_spr_gfu:
-	.db 0			; failing fd/uindex
-
-_spr_gfo:
-	.db 0			; failing u_files[uindex]
-
-_spr_gffr:
-	.db 0			; failing of_tab[oft].o_refs
-
-_spr_gffa:
-	.db 0			; failing of_tab[oft].o_access
-
-_spr_gfin:
-	.dw 0			; failing of_tab[oft].o_inode
-
-_spr_gfs:
-	.dw 0			; syscall context for failing getinode
-
-_spr_iac_devptr:
-	.dw 0			; i_alloc() dev pointer at corrupt path
-
-_spr_iac_ninode:
-	.db 0			; i_alloc() s_ninode snapshot
-
-_spr_iac_tinode:
-	.dw 0			; i_alloc() s_tinode snapshot
-
-_spr_iac_isize:
-	.dw 0			; i_alloc() s_isize snapshot
-
-_spr_iac_mounted:
-	.db 0			; i_alloc() s_mounted snapshot
-
-_spr_gd_dev:
-	.dw 0			; getdev() argument when PANIC_GD_BAD triggers
-
-_spr_gd_mnt:
-	.dw 0			; fs_tab_get(dev) pointer seen by getdev()
-
-_spr_gd_state:
-	.dw 0			; low=u_callno high=u_insys at PANIC_GD_BAD
-
-_spr_sys_enter_no:
-	.db 0			; last syscall number seen at unix_syscall_entry
-
-_spr_sys_enter_up0:
-	.db 0			; u_page[0] seen on syscall entry
-
-_spr_sys_enter_up1:
-	.db 0			; u_page[1] seen on syscall entry
-
-_spr_sys_enter_up2:
-	.db 0			; u_page[2] seen on syscall entry
-
-_spr_sys_enter_pp0:
-	.db 0			; ptab->p_page[0] seen on syscall entry
-
-_spr_sys_enter_pp1:
-	.db 0			; ptab->p_page[1] seen on syscall entry
-
-_spr_sys_enter_pp2:
-	.db 0			; ptab->p_page[2] seen on syscall entry
-
-_spr_sys_enter_ptab:
-	.dw 0			; u_ptab pointer seen on syscall entry
-
-_spr_sys_enter_fixup:
-	.db 0			; 1 if syscall entry repaired u_ptab, 2 if it repaired p_page[]
-
-_spr_sys_exit_no:
-	.db 0			; last syscall number seen after _unix_syscall
-
-_spr_sys_exit_err:
-	.dw 0			; last u_error snapshot after _unix_syscall
-
-_spr_sys_exit_up0:
-	.db 0			; u_page[0] seen after _unix_syscall
-
-_spr_sys_exit_up1:
-	.db 0			; u_page[1] seen after _unix_syscall
-
-_spr_sys_exit_up2:
-	.db 0			; u_page[2] seen after _unix_syscall
-
-_spr_sys_exit_pp0:
-	.db 0			; ptab->p_page[0] seen after _unix_syscall
-
-_spr_sys_exit_pp1:
-	.db 0			; ptab->p_page[1] seen after _unix_syscall
-
-_spr_sys_exit_pp2:
-	.db 0			; ptab->p_page[2] seen after _unix_syscall
-
-_spr_sys_exit_ptab:
-	.dw 0			; u_ptab pointer seen after _unix_syscall
-
-_spr_sys_fixup:
-	.db 0			; 1 if syscall exit rebuilt u_page[] from ptab
-
-_spr_sysarg_sp:
-	.dw 0			; original userspace SP seen on syscall entry
-
-_spr_doexec_arm:
-	.db 0			; arm one-shot doexec map probe
-
-_spr_doexec_seen:
-	.db 0			; 0=idle 1=armed hit 2=mapped
-
-_spr_doexec_map_ptr:
-	.dw 0			; map pointer consumed by armed map_proc_2
-
-_spr_doexec_expect:
-	.dw 0			; expected doexec entry address from C side
-
-_spr_doexec_isp:
-	.dw 0			; expected doexec user SP from C side
-
-_spr_doexec_u0:
-	.db 0			; armed map_proc_2 input u_page[0]
-
-_spr_doexec_u1:
-	.db 0			; armed map_proc_2 input u_page[1]
-
-_spr_doexec_u2:
-	.db 0			; armed map_proc_2 input u_page[2]
-
-_spr_doexec_u3:
-	.db 0			; armed map_proc_2 input u_page[3]
-
-_spr_doexec_m0:
-	.db 0			; mpgsel_cache[0] after armed map_proc_2
-
-_spr_doexec_m1:
-	.db 0			; mpgsel_cache[1] after armed map_proc_2
-
-_spr_doexec_m2:
-	.db 0			; mpgsel_cache[2] after armed map_proc_2
-
-_spr_doexec_call_seen:
-	.db 0			; map_proc_always probe armed from execve path
-
-_spr_doexec_call_word:
-	.dw 0			; shared scratch for map_proc_always stack-frame words
-
+;
+; Collapse unused ch_link / getinode / i_alloc / getdev probes into one
+; scratch block.  Separate .db/.dw storage pushed COMMONDATA past 0xFF00
+; and corrupted the IM2 vector page (_sprinter_dbg started at 0xFEFF).
+;
+_spr_misc_diag:
+	.ds 8
+
+_sprinter_chlink_stage	.equ _spr_misc_diag + 0
+_sprinter_chlink_wd	.equ _spr_misc_diag + 1
+_sprinter_chlink_nindex	.equ _spr_misc_diag + 3
+_sprinter_chlink_done	.equ _spr_misc_diag + 5
+_sprinter_chlink_error	.equ _spr_misc_diag + 7
+_sprinter_ideref_null_count	.equ _spr_misc_diag + 9
+_sprinter_ideref_null_sys	.equ _spr_misc_diag + 11
+_spr_gir	.equ _spr_misc_diag + 0
+_spr_giu	.equ _spr_misc_diag + 1
+_spr_gio	.equ _spr_misc_diag + 2
+_spr_gifr	.equ _spr_misc_diag + 3
+_spr_gifa	.equ _spr_misc_diag + 4
+_spr_giin	.equ _spr_misc_diag + 5
+_spr_gis	.equ _spr_misc_diag + 7
+_spr_gfcnt	.equ _spr_misc_diag + 9
+_spr_gfr	.equ _spr_misc_diag + 11
+_spr_gfu	.equ _spr_misc_diag + 12
+_spr_gfo	.equ _spr_misc_diag + 13
+_spr_gffr	.equ _spr_misc_diag + 14
+_spr_gffa	.equ _spr_misc_diag + 15
+_spr_gfin	.equ _spr_misc_diag + 5
+_spr_gfs	.equ _spr_misc_diag + 7
+_spr_iac_devptr	.equ _spr_misc_diag + 0
+_spr_iac_ninode	.equ _spr_misc_diag + 2
+_spr_iac_tinode	.equ _spr_misc_diag + 3
+_spr_iac_isize	.equ _spr_misc_diag + 5
+_spr_iac_mounted	.equ _spr_misc_diag + 7
+_spr_gd_dev	.equ _spr_misc_diag + 8
+_spr_gd_mnt	.equ _spr_misc_diag + 10
+_spr_gd_state	.equ _spr_misc_diag + 12
+
+;
+; Syscall enter/exit probes share one scratch block so COMMONDATA stays
+; below the IM2 vector page at 0xFF00 (COMMONMEM growth shifts this area).
+; Must be 16 bytes: exit probes write +10..+15 (was backed by arm/seen/dbg).
+;
+_spr_sys_diag:
+	.ds 16
+
+_spr_sys_enter_no	.equ _spr_sys_diag + 0
+_spr_sys_enter_up0	.equ _spr_sys_diag + 1
+_spr_sys_enter_up1	.equ _spr_sys_diag + 2
+_spr_sys_enter_up2	.equ _spr_sys_diag + 3
+_spr_sys_enter_pp0	.equ _spr_sys_diag + 4
+_spr_sys_enter_pp1	.equ _spr_sys_diag + 5
+_spr_sys_enter_pp2	.equ _spr_sys_diag + 6
+_spr_sys_enter_ptab	.equ _spr_sys_diag + 7
+_spr_sys_enter_fixup	.equ _spr_sys_diag + 9
+_spr_sys_exit_no	.equ _spr_sys_diag + 10
+_spr_sys_exit_err	.equ _spr_sys_diag + 11
+_spr_sys_exit_up0	.equ _spr_sys_diag + 13
+_spr_sys_exit_up1	.equ _spr_sys_diag + 14
+_spr_sys_exit_up2	.equ _spr_sys_diag + 15
+_spr_sys_exit_pp0	.equ _spr_sys_diag + 4
+_spr_sys_exit_pp1	.equ _spr_sys_diag + 5
+_spr_sys_exit_pp2	.equ _spr_sys_diag + 6
+_spr_sys_exit_ptab	.equ _spr_sys_diag + 7
+_spr_sys_fixup		.equ _spr_sys_diag + 9
+_spr_sysarg_sp		.equ _spr_sys_diag + 11
+
+; expect/isp share sys_diag (idle during doexec arm).  arm/seen are
+; real bytes below (must not share sys exit probes or dbg[] aliases).
+_spr_doexec_expect	.equ _spr_sys_diag + 0
+_spr_doexec_isp		.equ _spr_sys_diag + 2
+
+; doexec map/call probes share misc scratch (not arm/seen/expect/isp).
+_spr_doexec_probe	.equ _spr_misc_diag
+_spr_doexec_map_ptr	.equ _spr_doexec_probe
+_spr_doexec_u0		.equ _spr_doexec_probe + 0
+_spr_doexec_u1		.equ _spr_doexec_probe + 1
+_spr_doexec_u2		.equ _spr_doexec_probe + 2
+_spr_doexec_u3		.equ _spr_doexec_probe + 3
+_spr_doexec_m0		.equ _spr_doexec_probe + 0
+_spr_doexec_m1		.equ _spr_doexec_probe + 1
+_spr_doexec_m2		.equ _spr_doexec_probe + 2
+_spr_doexec_call_seen	.equ _spr_misc_diag + 4
+_spr_doexec_call_word	.equ _spr_misc_diag + 5
 _spr_doexec_call_sp	.equ _spr_doexec_call_word
 _spr_doexec_call_ra0	.equ _spr_doexec_call_word
 _spr_doexec_call_ra1	.equ _spr_doexec_call_word
 _spr_doexec_call_af	.equ _spr_doexec_call_word
 _spr_doexec_call_start	.equ _spr_doexec_call_word
 
-_spr_pg2_clamp_count:
-	.dw 0			; count of forced MPGSEL_2 clamps
+; boot/pg2 live in misc — never alias onto doexec arm/seen/isp.
+_spr_pg2_clamp_count	.equ _spr_misc_diag + 3
+_spr_pg2_last_raw	.equ _spr_misc_diag + 5
+_spr_boot_count		.equ _spr_misc_diag + 6
 
-_spr_pg2_last_raw:
-	.db 0			; raw MPGSEL_2 value before clamp
+_sprinter_trace_idx	.equ _spr_misc_diag + 0
+_sprinter_trace_buf	.equ _spr_misc_diag + 2
 
-_spr_boot_count:
-	.db 0			; number of entries into fuzix_main()
-
-_sprinter_trace_idx:
-	.dw 0			; 16-bit index to address a larger buffer
-
-_sprinter_trace_buf:
-	.ds SPR_TRACE_LEN
-
-_sprinter_dbg:
-		; keep >= max sprinter_dbg[] index used by C-side early trace
-		; probes (currently up to [30] in syscall_fs3.c).
-		.ds 32
+; dbg[] aliases exec_diag (16B).  Saves a second .ds 16 so COMMONDATA
+; ends ≤ 0xFF00; exec-fail latches are idle once /bin/sh is running.
+_sprinter_dbg		.equ _spr_exec_diag

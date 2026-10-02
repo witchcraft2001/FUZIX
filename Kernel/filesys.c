@@ -207,14 +207,19 @@ inoptr n_open(uint8_t *namep, inoptr *parent)
 	spr_map_win0_k();
     }
     /*
-     * After /bin/sh entry, directory walks still end in switchout →
-     * plt_monitor.  Fail PID1 userland n_open immediately with ENOENT
-     * so the shell can skip .profile / path probes and reach a prompt.
-     * Kernel u_sysio and execve synthetic opens are unaffected.
+     * After /bin/sh, directory walks still end in switchout →
+     * plt_monitor / i_open(garbage).  Key off spr_doexec_count (2nd+
+     * exec), not p_pid: init often execve's sh without fork so PID stays 1.
+     * Do not read bringup_noei from CODE3 — that previously regressed
+     * /init into validchk(FFFF) on write.  Kernel u_sysio opens OK.
      */
-    if (udata.u_ptab && udata.u_ptab->p_pid == 1 && !udata.u_sysio) {
-	udata.u_error = ENOENT;
-	return NULLINODE;
+    {
+	extern uint8_t spr_doexec_count;
+
+	if (udata.u_ptab && !udata.u_sysio && spr_doexec_count >= 2) {
+		udata.u_error = ENOENT;
+		return NULLINODE;
+	}
     }
 #endif
 
@@ -643,10 +648,10 @@ badino:
     sprinter_bad_iopen_ino = ino;
     sprinter_bad_iopen_a0 = nindex->c_node.i_addr[0];
     sprinter_bad_iopen_a1 = nindex->c_node.i_addr[1];
-    sprinter_dbg[28] = 0xBD;
-    sprinter_dbg[29] = (uint8_t)dev;
-    sprinter_dbg[30] = (uint8_t)ino;
-    sprinter_dbg[31] = (uint8_t)(ino >> 8);
+    sprinter_dbg[8] = 0xBD;
+    sprinter_dbg[9] = (uint8_t)dev;
+    sprinter_dbg[10] = (uint8_t)ino;
+    sprinter_dbg[11] = (uint8_t)(ino >> 8);
 #else
     kputs("i_open: bad disk inode\n");
 #endif
@@ -1594,16 +1599,29 @@ inoptr getinode(uint_fast8_t uindex)
 
     if(inoindex < i_tab || inoindex >= i_tab+ITABSIZE) {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-        spr_gfr = 2;
-        spr_gfu = uindex;
-        spr_gfo = oftindex;
-        spr_gffr = of_tab[oftindex].o_refs;
-        spr_gffa = of_tab[oftindex].o_access;
-        spr_gfin = (uint16_t)(uarg_t)inoindex;
-        spr_gfs = (uint16_t)udata.u_callno |
-            ((uint16_t)udata.u_insys << 8);
-        udata.u_error = EBADF;
-        return NULLINODE;
+        /*
+         * Bounce/patch can smash of_tab[].o_inode while i_tab[0] (tty)
+         * remains valid.  For stdio fds, reattach to the console node.
+         */
+        if (uindex < 3 && i_tab[0].c_magic == CMAGIC) {
+            of_tab[oftindex].o_inode = i_tab;
+            of_tab[oftindex].o_access = O_RDWR;
+            if (!of_tab[oftindex].o_refs)
+                of_tab[oftindex].o_refs = 1;
+            inoindex = i_tab;
+            sprinter_dbg[15] = 0x72;
+        } else {
+            spr_gfr = 2;
+            spr_gfu = uindex;
+            spr_gfo = oftindex;
+            spr_gffr = of_tab[oftindex].o_refs;
+            spr_gffa = of_tab[oftindex].o_access;
+            spr_gfin = (uint16_t)(uarg_t)inoindex;
+            spr_gfs = (uint16_t)udata.u_callno |
+                ((uint16_t)udata.u_insys << 8);
+            udata.u_error = EBADF;
+            return NULLINODE;
+        }
 #else
         panic(PANIC_GETINO_OFT);
 #endif
@@ -1878,6 +1896,32 @@ void magic(inoptr ino)
 #endif
     if(ino->c_magic != CMAGIC) {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
+        /*
+         * V7 sh bounce/patch has been seen to zero i_tab[0] (console
+         * tty) while of_tab[0..2] still reference it.  getinode then
+         * panics on ioctl(1, TCGETA).  Rebuild a minimal tty1 node so
+         * userland can continue; other corruptions still panic.
+         * Temporary bring-up only (CONFIG_SPRINTER_EARLY_TRACE).
+         */
+        if (sprinter_magic_site == 4 && ino == i_tab) {
+            ino->c_magic = CMAGIC;
+            ino->c_dev = root_dev;
+            ino->c_num = 0;
+            ino->c_node.i_mode = F_CDEV | 0666;
+            ino->c_node.i_nlink = 1;
+            ino->c_node.i_uid = 0;
+            ino->c_node.i_gid = 0;
+            ino->c_node.i_size = 0;
+            ino->c_node.i_addr[0] = 0x0201; /* major 2 minor 1 */
+            ino->c_flags = 0;
+            ino->c_readers = 0;
+            ino->c_writers = 0;
+            if (!ino->c_refs)
+                ino->c_refs = 1;
+            sprinter_dbg[15] = 0x71;
+            return;
+        }
+        {
         uint_fast8_t slot = 0xFF;
         uint16_t pid = 0;
 
@@ -1904,6 +1948,7 @@ void magic(inoptr ino)
         kprintf("magic0 raw=%x %x %x %x\n",
             ((uint8_t *)ino)[0], ((uint8_t *)ino)[1],
             ((uint8_t *)ino)[2], ((uint8_t *)ino)[3]);
+        }
 #endif
         panic(PANIC_CORRUPTI);
     }

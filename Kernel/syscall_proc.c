@@ -262,6 +262,30 @@ arg_t brk_extend(uaddr_t addr)
 
 arg_t _brk(void)
 {
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern uint8_t sprinter_bringup_noei;
+		extern uint8_t sprinter_dbg[];
+		uaddr_t cur = udata.u_break;
+
+		/*
+		 * After /bin/sh: crt0 calls brk(s__DATA+l__DATA) which
+		 * shrinks below the loader's u_break (0x7610).  Must allow
+		 * that shrink.  Allow small growth for malloc; refuse huge
+		 * growth that uzero'd PROGLOAD on the signed-sbrk path.
+		 */
+		if (sprinter_bringup_noei && addr != cur) {
+			if (addr < PROGLOAD ||
+			    (addr > cur && (addr - cur) > 0x800)) {
+				udata.u_error = ENOMEM;
+				return -1;
+			}
+		}
+		/* Latch PROGLOAD signature around the crt0 brk shrink. */
+		if (sprinter_bringup_noei)
+			sprinter_dbg[9] = (uint8_t)ugetc((uint8_t *)PROGLOAD);
+	}
+#endif
 	/* Attempt to grow the BSS: this function can be customised by the architecture/platform */
 	if ((udata.u_error = brk_extend(addr)) != 0)
 		return -1;
@@ -269,10 +293,25 @@ arg_t _brk(void)
 	   the extra as we no longer guarantee it is clear already */
 	if (addr > udata.u_break) {
 		uaddr_t old_break = udata.u_break;
+		uaddr_t zstart = old_break;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+		if (zstart < PROGLOAD)
+			zstart = PROGLOAD;
+#endif
 		udata.u_break = addr; /* for safety checks in uzero */
-		uzero((void *)old_break, addr - old_break);
+		if (addr > zstart)
+			uzero((void *)zstart, addr - zstart);
 	}
 	udata.u_break = addr;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	{
+		extern uint8_t sprinter_bringup_noei;
+		extern uint8_t sprinter_dbg[];
+
+		if (sprinter_bringup_noei)
+			sprinter_dbg[10] = (uint8_t)ugetc((uint8_t *)PROGLOAD);
+	}
+#endif
 	return 0;
 }
 
@@ -289,9 +328,29 @@ uint16_t incr;
 arg_t _sbrk(void)
 {
 	uaddr_t oldbrk;
-	ssize_t inc = incr;
+	usize_t raw = (usize_t)udata.u_argn;
+	ssize_t inc = (ssize_t)raw;
 
-	udata.u_argn += (oldbrk = udata.u_break);
+	oldbrk = udata.u_break;
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	/*
+	 * After /bin/sh crt0 brk shrink: allow small heap growth for
+	 * malloc/stdio.  Limit positive growth only: V7 sh reclaims its
+	 * temporary stack with sbrk(-512) after each command.
+	 */
+	{
+		extern uint8_t sprinter_bringup_noei;
+		extern uint8_t sprinter_dbg[];
+
+		if (sprinter_bringup_noei)
+			sprinter_dbg[11] = (uint8_t)ugetc((uint8_t *)PROGLOAD);
+		if (sprinter_bringup_noei && inc > 0x800) {
+			udata.u_error = ENOMEM;
+			return -1;
+		}
+	}
+#endif
+	udata.u_argn += oldbrk;
 
 	/* Check for wraps */
 	if ((inc > 0 && oldbrk > udata.u_argn) || (inc < 0 && oldbrk < udata.u_argn)) {

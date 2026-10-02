@@ -3,6 +3,12 @@
 Port of FUZIX OS to the Sprinter — a Russian ZX Spectrum-compatible home computer
 with a full Z80 CPU upgrade, 4 MB RAM and IDE storage.
 
+**Latest checkpoint (2026-10-02):** the exec sector mismatch is fixed, and
+V7 `fsh` accepts PS/2 input, executes `set`, and returns to the prompt without
+heap errors. External commands still fail in `fork`; interrupts, filesystem
+guardrails, and the special exec loader remain in bring-up mode. See the final
+update below. Earlier sections describe historical checkpoints.
+
 ## Hardware
 
 | Component | Details |
@@ -9863,31 +9869,931 @@ Next:
 3. Real `srch_dir` still deferred; keep synthetic opens until that is safe
 
 
-### Update from 2026-07-20 (night): hang mitigations after /bin/sh entry
+### Update from 2026-07-20 (late): post-/bin/sh null_hang localization
 
-Goal: stop the post-`/bin/sh` freeze (HALT≈F251 / `psleep: voodoo`).
+Checkpoint after hang-mitigation (`/bin/sh` loads, then dies):
 
-Changes (all under `CONFIG_SPRINTER_EARLY_TRACE`):
+**Verified**
 
-1. **PID1 tty busy-poll** in `do_psleep()` for `read`/`write` and
-   `ttyinq`/`ttydata` wait events — avoids `switchout` → monitor on
-   interactive tty waits. Disk sleepers stay on the real idle path so
-   `/init` load is not starved.
-2. **PID1 VOODOO recovery** — if `p_status` is non-canonical, busy-poll
-   instead of `panic("psleep: voodoo")`.
-3. **Accept `P_READY`** in the psleep status switch (early-trace).
-4. **PID1 userland `n_open` → ENOENT** — skip broken directory walks
-   (`.profile` / path probes) so the shell is not trapped in `namecomp`.
-5. **Sticky `u_sysio` clear** for exec path pointer `0x01C6` so synthetic
-   `/bin/sh` open matches.
-6. **`cdwrite`**: no `sprinter_force_bank1()` after the kputchar loop.
-7. Filesystem rebuilt; `/init` = `sprinit_raw` (ino 131, block 293).
+1. `/bin/sh` still loads with PID1 tty busy-poll + trailing `ei()`
+   (`PROGLOAD+0x12 = D5 D9`).
+2. Post-entry death is `sprinter_null_stub` → `null_hang`
+   (`PC≈0xF2B1`, `HALT=1`, `nullh≥1`).
+3. At that edge `SP≈0x2170` (corrupt; should be near `u_isp`/`udata`),
+   `callno` still latched as `0x17` (execve), `IFF1=0`.
+4. Trailing `ei()` in the busy-poll is required for `/bin/sh` load:
+   a `di()`-only poll makes `_execve`/`doexec` return into
+   `panic("no /init")` even though `doexec seen=2` and `sh` bytes are
+   in user RAM.
+5. A one-shot "re-enter from doexec latches" in `sprinter_null_stub`
+   was tried and **rejected**: repeated NULL edges trashed
+   `COMMONDATA` / `mpgsel` (`nullh` climbed, pages garbage).
 
-MAME (8s one-shot, no live remapping):
+**Current tree**
 
-- `/bin/sh` **loads** (`PROGLOAD+0x12` = `D5 D9`)
-- No `psleep: voodoo` when recovery is active
-- Still eventually `HALT=1` in the common IRQ/monitor area with a bad SP
-  — next target: first post-entry syscall that is neither tty nor open
+- `process.c`: tty/PID1 busy-poll with `ei()` around poll and trailing
+  `ei()` on return (known-good load path).
+- `sprinter_null_stub`: latch + hang only (no recovery trampoline).
+
+**Next targets**
+
+1. Stop SP corruption that precedes the NULL jump (syscall exit /
+   IRQ / banked return after first sh syscall) — prefer a platform
+   trampoline over core churn.
+2. Keep disk `psleep` on the real idle path (blanket PID1 busy-poll
+   races inode I/O into `corrupt inode`).
+3. Dump without live remapping: `nullh`, `dbg[16..20]`, `u_isp`,
+   stack words at hang, first user PC after sh entry.
 
 Artefact: `fuzix.chd` sha256 `297c88bd6c187d8bddece31139f343412791009a0161d9967ae23b9e8b09e0aa`
+
+
+### Update from 2026-07-21: write carry poison + COMMONDATA fit + sh load
+
+**Fixed: sprinit `write()` false failure (stage 0x93).**
+`writei`/tty path transferred all bytes (`u_done=24`) but a stale
+`u_error` (ENOENT/EMFILE) set carry on syscall return. The previous
+guard keyed on `spr_rw_stage==0xC2` / `dbg[0]==0xBC`; both live in
+shared COMMONDATA scratch and were clobbered before `unix_return`.
+Now `lowlevel-z80-banked.s` clears error and reloads retval when
+`callno==write && u_done!=0`.
+
+**Fixed: COMMONDATA must end ≤ `0xFF00` (IM2 page).**
+Null-stub / doexec marker growth kept pushing `_sprinter_dbg` into
+`0xFF00`. Collapsed unused probes; keep `s__COMMONDATA+l__COMMONDATA
+≤ 0xFF00` after every rebuild. Do **not** alias `_spr_boot_count` /
+`_spr_pg2_*` onto `_spr_doexec_arm/seen/isp` — that corrupted doexec
+probes (seen `arm=ED seen=4D`).
+
+**Fixed: HALT hole at user `0x002C`.**
+After doexec map-apply, also plant `jp sprinter_null_stub` at `0x002C`
+(was literal `0x76 HALT` from user-page garbage).
+
+**Current MAME picture (t≈10):**
+1. sprinit writes succeed → `execve("/bin/sh")`.
+2. `sh=true` (`PROGLOAD+0x12 = D5 D9`), `SP≈0xEDD3` near `u_isp`.
+3. Still dies on early sh user path: `PC=0x002C` (now vector to null
+   stub), `callno=23` leftover, `/bin/sh` `__syscall` site at `0x4DAB`
+   still not a clean `CD 00 00 D0` under remap (reloc stream gap).
+4. `null→syscall` trampoline present (marker `0xDF`); skips when
+   `insys!=0` to avoid nesting.
+
+**Next targets**
+1. Make sh's first `brk` via unrelocated `__syscall` reliably hit the
+   trampoline with user pages mapped (or fix `relocbin`/patch
+   `call 0x0100` at load).
+2. Confirm `0x4DAB` bytes under live user map without dump-time remap
+   confusion.
+3. Keep COMMONDATA ≤ `0xFF00` invariant on every kernel link.
+
+
+**Root cause fixed (critical):** `_COMMONDATA` had grown past `0xFF00`.
+`_sprinter_dbg` started at `0xFEFF` and the 32-byte array wrote into the
+IM2 vector page (`I=0xFF` table at `0xFF00`). That produced freezes at
+`_exec_or_die` (`PC≈0x5530`) during `execve("/bin/sh")` with trashed
+banking. Collapsed unused ch_link/getinode/i_alloc/getdev probes into
+`_spr_misc_diag` (16 bytes). Now `l__COMMONDATA=0xAD`, ends exactly at
+`0xFF00`; `_sprinter_dbg` at `0xFEDA`.
+
+**Also restored** trailing `ei()` on PID1 tty busy-poll return — without
+it sprinit never reaches `execve("/bin/sh")` (stuck in write path /
+`_exec_or_die` freeze).
+
+**New verified edge (after COMMONDATA fix + trailing ei):**
+
+1. `/bin/sh` loads (`PROGLOAD+0x12 = D5 D9`, `sh=true`).
+2. User entry happens: `insys=0`, `mpgsel` user pages `44 45 46`,
+   `SP≈0xEDCD` near `u_isp=0xEDEE` (old `SP≈0x2170` corruption is gone).
+3. Death is still NULL-path: `nullh=1`, `HALT=1`.
+4. NULL vector itself is correct: `0x0000 = C3 5D F2` → `sprinter_null_stub`.
+5. At hang `PC=0x002C` (not `null_hang` at `~0xF2B0`) with stack word
+   `0x121F` — user code jumped to NULL after CRT/reloc; need the exact
+   instruction that issued the NULL jump (likely early `brk`/reloc).
+
+**Current tree**
+
+- `sprinter.s`: COMMONDATA shrink; re-install NULL/RST30/RST38 on doexec
+  map apply (`seen=1→2`).
+- `process.c`: PID1 tty busy-poll with trailing `ei()`.
+- Stock syscall `ei` / `unix_pop` (bring-up noei experiments reverted).
+
+**Next targets**
+
+1. Catch first user PC after sh `doexec` (reloc / `_brk`) — why NULL with
+   sane SP and good vector.
+2. Keep `_COMMONDATA` strictly below `0xFF00` on every rebuild.
+3. Optional: defer userland `ei` until after CRT reloc/`brk` only.
+
+Artefact: `fuzix.chd` sha256 `d31a2b705a0e9ee978709b5d4223564414ec6cb05dfee168f93488da5c2f7116`
+
+
+### Update from 2026-07-21: libc `call 0` → unix_syscall on user map
+
+**Root cause of post-sh NULL path:** stock Z80 libc `__syscall` is
+`call __text; ret nc` with `__text` absolute 0, so the on-disk site is
+`CD 00 00 D0`.  `relocbin` never emits a reloc for that byte (both
+0x100/0x200 links keep `call 0`).  Sprinit avoids this via `dosys` →
+`call 0x0100`; `/bin/sh` does not.
+
+**Fix (platform only):** on doexec `map_apply` (`seen=1→2`), plant
+`jp unix_syscall_entry` at user `0x0000` (keep `0x002C` on
+`sprinter_null_stub` for the HALT hole).  Kernel `program_vectors` still
+points `0x0000` at `null_stub` — retargeting kernel NULL to syscall
+caused early `plt_monitor` during boot.
+
+**Do not** add a C scanner in `main.c` / CODE1 to rewrite `CD 00 00` →
+`CD 00 01`: that grew banked CODE1 and broke the second sprinit
+`write()` (RST38 executing `FF` inside `_i_tab` at `PC=0x1743`).
+
+**Also:** simplified `sprinter_null_stub` (latch + hang only) to reclaim
+COMMONMEM so `COMMONDATA` end stays ≤ `0xFF00` (now `0xFE5C`).
+
+**Verified (MAME t≈14):**
+1. sprinit writes + `execve("/bin/sh")` OK.
+2. `sh=true` (`PROGLOAD+0x12 = D5 D9`).
+3. User `vec0 = C3 AA F4` → `unix_syscall_entry`; `__syscall` site still
+   `CD 00 00 D0` (intentional — served by vector 0).
+4. No more `nullh` / `PC=002C` death on first sh entry.
+5. New edge: `plt_monitor` hang (`PC≈0xF172`), `callno=10` (`chdir`),
+   `insys=0`, `nullh=0`.  `panic_ptr` latch was clear at dump time —
+   need deathcry / caller capture on the next run.
+
+**Next targets**
+1. Identify who calls `plt_monitor` after sh (`dbg`/`panic` path,
+   `chdir` failure vs banked return trash).
+2. Keep `COMMONDATA` end ≤ `0xFF00` after every link.
+3. Dump: `0xFE00` panic ptr/bytes, `u_error`, live `u_page`, stack at
+   `SP≈0xEDEB`, and whether `brk` (syscall 30) ever ran.
+
+Artefact: `fuzix.chd` sha256 `3ddec44e9a288ec26ef15cd5edd230c90930438b1443d98d89c8f3eca56d2bb8`
+
+
+### Update from 2026-07-21: tiny `/bin/sh` reaches write(1)
+
+Bring-up focus after `execve("/bin/sh")` was stuck:
+
+1. **E2BIG stage 8** — sticky `u_sysio` + kernel WIN0 made `rargs(argv)`
+   walk CODE. PID1 now synthesizes argv/envp under early-trace.
+2. **EIO stage 12 at `u_done=0xBF0`** — multi-sector `readi`→`uputblk`
+   fails after ~6 blocks (reproducible). Stock V7 sh (~30KB) cannot load yet.
+3. **FS packing quirk** — root dirents are off-by-one vs directory `.`
+   self-refs (`/bin` name→ino51 has `/dev` content; real utils in ino52).
+   `/init` dirent points at a directory; real `sprinit_raw` is ino132.
+4. **Workaround** — `sprsh_raw` (~60B) replaces `/bin/sh` in the platform
+   pkg; synthetic open uses ino178/blk1003. MAME: `@112=2110` (sprsh
+   entry), `callno=08` (write in progress). Next: finish tty write path
+   so `SPRINTER SH OK` appears, then fix multi-sector exec load.
+
+Artefacts: `fuzix.chd` sha256 `40d8885e829c717d46a45bd7c4d74a127aa245e22cdfe70807f71ed1a223eaee`
+
+### Update from 2026-07-21: stable sprsh write return (no RST38)
+
+After `sprsh` `write(1)` completed (`u_done=0x10`) the CPU still died in
+`rst38_hang` with `rst38_ret=E607` — executing `0xFF` in the FONT hole.
+Same class of failure that earlier required `di` in `sprinit` idle after
+`unix_pop`'s trailing `ei`.
+
+Fix (bring-up):
+
+1. **Wire `_sprinter_bringup_noei`** — `_doexec` sets it on the second+
+   exec (`doexec_cnt>=2`); `unix_pop` skips `ei` when set (sprinit still
+   gets stock `ei`).
+2. **`sprsh_raw` `di` before hang** — belt-and-suspenders; size 61;
+   synth open `ino178/61/blk1003`.
+
+MAME t≈12:
+
+- `PC=0127` (`di; jr hang`), `HALT=0`, `IFF=0`, **`rst38=0`**
+- `u_done=u_retval=0x10`, `u_error=0`
+- `noei=1`, `doexec_cnt=2`, `@126=F3`, `@127=18 FE`
+
+Next: confirm VRAM shows `SPRINTER SH OK`; then multi-sector `readi`
+EIO at `0xBF0` so stock V7 `sh` can load; repair root dirent off-by-one.
+
+Artefact: `fuzix.chd` sha256 `7f1b447b9e2babb416114f3ad28c39cc9a9d83b5b269aa6e456ee4fa7bfcf851`
+
+### Update from 2026-07-21: multi-sector exec via bounce (past 0xBF0)
+
+Root cause of `execve` stage-12 EIO at `u_done=0xBF0`: PID1 body load
+through `readi`→`uputblk` (user WIN1/2 remap while draining the block
+cache) fails around the 6th sector.  Small images (sprinit / 60B sprsh)
+never hit it.
+
+Fix (early-trace, PID1, `bin_size>256`):
+
+1. Per-`BLKSIZE` `readi` into `_sprinter_exec_bounce` with `u_sysio`
+   (kernel `memcpy` / no user map during `bread`).
+2. Then `uput(bounce → user)`.
+3. Bring-up `/bin/sh` is a **4KB** `sprsh4k` image (ino178 / blks
+   1200–1207) so the bounce path is exercised; text still ends in
+   `write(1,"SPRINTER SH OK")` + `di; jr`.
+
+MAME:
+
+- `doexec=2`, `noei=1`, `rst38=0`, `HALT=0`, `PC=0127` (`di` hang)
+- `u_break=0x1100` (4096-byte load landed)
+- Screen: `SPRINTER WRITE ONLY OK` / `SPRINTER IDLE OK` (SH OK is on a
+  later VT row after the second exec's `SPR@E*` marks)
+
+Full stock V7 sh (~30KB, single-indirect) still needs follow-up: load
+completes far enough for a truncated image to `doexec`, but the real
+reloc/`call 0` path is not stable yet.  Do **not** poke
+`_kernel_pages` from usermem `restore_k12` — that regresses boot.
+
+Artefact: `fuzix.chd` sha256 `d718af23f3a2a4934b42b6ef1b9c6e5222caf9a6fca120ed84ad9e1ca8ab40c9`
+
+### Update from 2026-07-21: full V7 sh bounce — map_kernel + trusted diag
+
+Previous full-sh attempt stalled near `got≈0x2200` (~8.5KB body) with
+unreliable `fail_stage` (diag aliases). Root issues addressed:
+
+1. **`_spr_exec_diag` expanded to 16 bytes** with a layout that matches
+   the C externs (`stage` u8, `err`/`done`/`count` u16). `last_exec_*`
+   no longer write past the 8-byte block into `_spr_misc_diag`.
+2. **Bounce loop calls `map_kernel()` + `spr_map_win0_k()`** before every
+   `readi`, so WIN1/2 are kernel before `bread`/`bmap` (needed for the
+   nested bread of the single-indirect block at FS blk 1075, and also
+   for later direct chunks after `uput` remaps).
+3. Progress / failure detail goes to **`sprinter_dbg[0..4]`**
+   (`got` hi/lo, `u_error`, requested `n`, short `u_done`) so dumps
+   survive later stage writes.
+
+Synth open still targets stock V7 sh **ino 177** (29968 bytes,
+blocks 1057–1074 direct + 1075 indirect).
+
+MAME script: `mame_sh_full.lua` (addrs from current `fuzix.map`).
+Expect on success: `fail_stage=E6`, `done≈0x7500` (29952 body),
+`doexec≥2`, `@0112=D5D9` (stock sh sig), `u_break≈0x7600`.
+
+On failure: `fail_stage=12`, `done`/`dbg` = bytes loaded so far,
+`count` = `u_offset`, `dbg[2]` = `u_error`.
+
+Artefact: `fuzix.chd` sha256 `2987ac5346a9bf0ef0b8796c0b8db05615773c660f61abe5b9af0919d9460855`
+`COMMONDATA` end `0xFEB7` (≤ `0xFF00`).
+
+### Update from 2026-07-21: bounce CODE3 + uput/bread EIO blocker
+
+Findings while loading stock V7 / sprsh4k via geometric bounce:
+
+1. **`execbounce.c` must be CODE3** (`CROSS_CC_SEG4`), same bank as
+   `__execve`.  A CODE1 build was reached by a direct `call` and ran
+   the wrong page (`u_done` stayed 16, stage 12).  Added to
+   `fuzix.lnk` + platform `C4SRCS`.
+2. **Do not remap WIN1/2 while a `bread` buffer is live** — `__bf_data`
+   may sit in those windows; `memcpy` then reads garbage / next `bread`
+   returns EIO.
+3. **After the first successful `uput` of 512 body bytes**, the next
+   `bread` fails with `EIO` (and often `HALT` in the monitor with
+   `kernel_pages` on CODE2).  Reproduced with both V7 geometry and
+   sprsh4k (`done=0x0200`, `@0112` correct sig, then stage 12).
+   Bread-only (no `uput`) also dies around `got≈0x0600` with CODE1
+   left mapped under CODE3 PC — banked IDE path is fragile under
+   repeated bounce traffic.
+4. **LDIR rewrite of `__uput` for all callers breaks boot** (sources in
+   WIN1/2 disappear when user pages are mapped).  Left stock byte
+   `__uput` in place.
+
+**Stable bring-up path (current):** synth `/bin/sh` → tiny `sprsh_raw`
+(FS blk **1003**, 61 bytes).  Body `<256` so `__execve` uses `readi`,
+not bounce.  Bounce infrastructure kept for the next attempt.
+
+**Next for V7/4KB sh:** make `uput`↔`bread` coexistence safe (likely
+commonmem one-shot copy that cannot grow past IM2 at `0xFF00`, or
+`td_raw` user IDE into the process map without cache bounce), and/or
+a CODE3-resident trampoline that re-homes banks after every IDE PIO.
+
+### Update from 2026-07-21: spr_uput_win0 unblocks sprsh4k bounce
+
+`spr_uput_win0` in COMMONMEM (compact one-shot map+LDIR, src must be
+WIN0; restore from `_kernel_pages` not live `mpgsel_cache`).  Stock
+byte `__uput` left for all other callers.
+
+**Verified (MAME, sprsh4k / ino177 / blks 1200–1207):**
+
+- `fail_stage=17` (pre-`doexec`), `doexec=02`, `seen=02`, `noei=01`
+- `HALT=0`, `kp 48 4E 4F`, `u_break=0x1100`, `@0112=2110`
+- `COMMONDATA` end `0xFEF8` (≤ `0xFF00`); bounce `@0x334D`
+
+`BOUNCE_MAX=512` (not 2048): accumulating multiple `bread`s before the
+first user copy still dies near `got≈0x0600`; one bread + one LDIR per
+iteration is stable through the full 4KB body.
+
+**Next:** stock V7 `fsh` geometry (1057–1074 + ind 1075), then a real
+`/bin/sh` that returns from `write(1)` without the bring-up `di` hang.
+
+Artefact: `fuzix.chd` sha256 `7ec56f6318dda0a5a6c843f13ece58e50e4de3635ba1e0ff3b10af73be75392a`
+
+### Update from 2026-07-21: V7 sh full bounce load
+
+Root cause of the `got=0x2200` truncate: SDCC coalesced the bounce
+loop's stack slot for `n` with `fsblk`, and `BC` (holding `n`) is not
+preserved across banked `bread`/`memcpy`/`uput` calls — `left` hit 0
+after 17×512.  Counters moved to WIN0 `_sprinter_exec_tmp`.
+
+**Verified (MAME, stock V7 sh ~29968B, blks 1057–1074 + ind 1075):**
+
+- `fail_stage=17` (pre-`doexec`), `dbg[0]=0xEA`, `@0112=D5D9`
+- `u_break=0x7610`, `kp 48 4E 4F`, body fully loaded
+- Still `HALT` early in `doexec` (`PC=0x0F74`, `seen=00`) — next is
+  post-`doexec` / user entry, not the loader
+
+Artefact: `fuzix.chd` sha256 `c3f131239d201bb14188962b34fe71b83f39bff4d652517687c163738c3ede00`
+`COMMONDATA` end `0xFEF8`; bounce `@0x334D`; tmp `@0x3D4D`.
+
+### Update from 2026-07-21: V7 sh reaches ioctl(TCGETA); RST38 next
+
+Death frame after full bounce + syscall patch was **not** VT/cursor:
+`dbg15=EF` was SP high in `_plt_monitor` death frame (`SP=EFBA`).
+Real panic: `corrupt inode` during `ioctl` (`callno=0x1D`).
+
+Root causes on the post-`doexec` path:
+
+1. **`i_tab[0]` (console tty) magic zeroed** during V7 bounce/patch while
+   `of_tab[0..2]` still referenced it → `MAGIC_CHECK(4)` in `getinode`.
+2. **`of_tab[].o_inode` can also be smashed** to a non-`i_tab` pointer
+   (seen `0x0F8D`) → EBADF / null path without the magic panic.
+
+Bring-up repairs (under `CONFIG_SPRINTER_EARLY_TRACE` only):
+
+- `filesys.c:magic()` — if site 4 and `ino == i_tab`, rebuild a minimal
+  tty1 node (`F_CDEV`, `i_addr[0]=0x0201`) instead of panicking.
+- `filesys.c:getinode()` — for stdio fds, if `o_inode` is outside `i_tab`,
+  reattach to `i_tab[0]` when that slot still has `CMAGIC`.
+
+**Verified (MAME t≈55):**
+
+```
+doexec=02 noei=01 @0112=D5D9 @57FA=CD0001D0
+fd1_ino=16E6 i0_mg=6091
+callno=1D ioctl(1, TCGETA=000C, data=EDE4)
+panic=(none) nullh=00
+rst38=01 ret=6481  ← next blocker (executing 0xFF in CODE2)
+```
+
+User stack buffer at `0xEDE4` is in common below `udata` (`PROGTOP=0xEE00`).
+Attempts to special-case `user_map_de` for common/stack addresses regressed
+boot; left stock remap for now.
+
+**Next:** decode `rst38_ret=0x6481` (FF at `0x6480` in CODE2 during
+`tty_ioctl`/`uput` of termios), then get past TCGETA to a live prompt.
+
+Artefact: `fuzix.chd` sha256 `4e85fc1818a9d104e720c51da01772597d2d11f068a74ca4bbedde108a752c42`
+`COMMONDATA` end `0xFEB9`.
+
+### Update from 2026-07-21: past ioctl RST38; write hits C000 hole
+
+`rst38_ret=6481` was CODE1 `_ioctl` epilogue (`pop af` after `d_ioctl`)
+executed with CODE3 mapped (`0x6480=FF`).  Root cause: bounce / nested
+`__bank_1_3` left WIN1/2 on CODE3 while PC was still in CODE1.
+
+Fixes (platform / early-trace only):
+
+1. `usermem.s`: no WIN1/2 remap for dest `≥0xC0` (live common / stack);
+   `_uputw` common path skips save/restore; save/restore uses
+   `_kernel_pages` not stale `mpgsel_cache`.
+2. `spr_tty_ioctl` wrapper (`main.c` + `devices.c`/`discard.c`):
+   `sprinter_force_bank1()` before and after `tty_ioctl`.
+
+**Verified (MAME t≈60):**
+
+```
+doexec=02 noei=01 fail=11
+rst38=01 ret=C001   ← ioctl 6481 gone
+callno=07 write(0, EDB1, 1) done=0000
+kp/mp at dump 48 49 4A (BANK1); rst38 mp was 48 4C 4D (BANK2)
+@C000=FF… (COMMONMEM starts EE00 — C000..EDFF is an FF hole)
+```
+
+**Next:** stop the jump into `0xC000` on the first tty `write` after
+TIOCGPGRP (stack/return or banked VT/`plot_char` path).
+
+Artefact: `fuzix.chd` sha256 `54363f724fd86f27d7d44fc87a347030672f710fd6b07c67c8b50a884df0af80`
+`COMMONDATA` end `0xFECF`.
+
+### Update from 2026-07-21 (evening): past C000; sh call0; read→FONT
+
+`callno=07` was **read** (Function 7), not write.  After ioctl the
+shell blocks on `read(0, EDB1, 1)`.
+
+Cleared this step:
+
+1. **`usermem.s`**: common-path skip for `__uputc` / `__ugetc` /
+   `__ugetw` when addr `≥0xC0` (same rule as `_uputw`).
+2. **`tty.c`**: under `EARLY_TRACE`, write common destinations in
+   `tty_read` directly (avoid CODE1→CODE2 `uputc` bounce).
+3. **`map_apply_cached`**: install `JP unix_syscall_entry` at user
+   `0x0000` (was `null_stub` → `null_hang` at `F24B` on libc `call 0`).
+
+**Verified (MAME):**
+
+```
+t=8   doexec=01 nullh=00 HALT=0          ← /init alive
+t=10  doexec=02 noei=01 nullh=00
+      @0 = C3 AB F4  (unix_syscall_entry) ← call0 fixed
+      rst38=01 ret=DD02                   ← FONT hole
+      rw_stage=B0  (entered tty_read)
+```
+
+`ret=DD02` is inside `s__FONT`.  Cause: PID1 tty busy-poll in
+`do_psleep` does `ei()` + `timer_interrupt()`; with
+`_sprinter_bringup_noei` a stray IRQ remaps banks and executes FONT.
+Attempts to strip `ei()` unconditionally (or gate on the noei byte
+from banked C) regressed `/init` dup/IDE.
+
+**zxevo note:** `platform-zxevo` has a similar 16K-page MMU (shadow ports
+`BF`/`x7F7` vs Sprinter `82/A2/C2/E2`) and is a good reference for
+`map_proc` / `program_vectors`.  It is **not** a drop-in for idle/IRQ:
+zxevo keeps a contiguous kernel `0000–BFFF`, installs a real
+`interrupt_handler` at `0x0038`, and idles with `HALT`.  Sprinter uses
+banked CODE1/2/3 plus a bring-up IM2 absorber that must keep IFF1 clear
+until the real dispatcher is safe — so zxevo `HALT`/`ei` patterns must
+not be copied blindly.
+
+**Next fix in tree:** COMMONMEM `sprinter_psleep_tty_ei` /
+`sprinter_psleep_maybe_ei` — EI only when `!_sprinter_bringup_noei`;
+`kbd_poll`/`timer_interrupt` stay as banked C calls from `process.c`.
+
+**Next emulator check:**
+
+1. `rst38=0`, `HALT=0` past sh first `read` (`rw_stage` past `B0`/`B4`).
+2. `/init` still reaches `doexec=02` (`nullh=00`, no early hang on
+   dup/IDE).
+3. Further syscalls / prompt if possible.
+
+Dump focus (`COMMONDATA` end `0xFEFD`):
+
+| latch | addr |
+|-------|------|
+| `sprinter_bringup_noei` | `0xFEB7` |
+| `spr_doexec_count` | `0xFEB8` |
+| `sprinter_rst38_count` | `0xFE9F` |
+| `sprinter_rst38_ret` | `0xFEA2` |
+| `spr_rw_stage` | `0xFED0` |
+| `sprinter_nullh_count` | `0xFEBB` |
+| `@0` user vectors | `0x0000` |
+
+Artefact: `fuzix.chd` sha256 `4acfb6773a04ac9c46b18891f56368fa9ec98e940e91a12627fc9e3beff16f2a`
+`COMMONDATA` end `0xFEFD`.
+
+### Update from 2026-07-21 (night): MAME loop — past empty read; next `i_open`/`invalid dev`
+
+Ran the emulator locally. Results:
+
+1. **EI gate works** (`sprinter_psleep_tty_ei` / `maybe_ei`): while sh
+   blocks on empty `read`, `rst38=0`, `HALT=0`, busy-poll stable.
+2. **`_doexec` unix@0 must preserve HL** — an earlier install clobbered the
+   user entry and `jp (hl)` entered `unix_syscall_entry` (udata smash).
+3. **One-shot `'\n'` in `tty_read`** (CODE1, bank-safe) completes the first
+   console read (`done=0001`, stage `B5`).
+4. **`spr_tty_read` / `spr_tty_write` wrappers** (`force_bank1`) cleared the
+   post-read FONT RST38 (`ret=DD02`) that appeared on the second tty entry
+   with CODE2/3 still in `kernel_pages`.
+5. **`unix_syscall`'s trailing `ei()`** also gated via `maybe_ei` so it does
+   not undo the asm `unix_pop` skip.
+
+**Current blocker (MAME t≈9.5):** `plt_monitor` with panic
+`invalid dev`. Latches:
+
+```
+validchk_dev=F442  site=i_open
+u_page at death 48 4E 4F  (kernel CODE3 pages — corrupt for a user task)
+```
+
+`0xF442` sits inside `_spr_initmsg` (COMMONMEM) — a pointer used as a
+`dev_t`. Empty-line handoff after the primed read reaches `i_open` with
+a smashed device id.
+
+**Next:** trace who calls `i_open` after the first sh `read` returns
+(namei / relative open / tty reopen) and why `dev` is a common-string
+pointer; keep `/init` (`doexec=01`) green.
+
+Artefact: `fuzix.chd` sha256 `d0afe1fccb1867c4d3a838bee1c902ec57997cd48a2b44311cccac3a5c649cbe`
+`COMMONDATA` end `0xFEFF`.
+
+### Update from 2026-07-21 (evening): past `invaliddev`; sh vectors / HALT
+
+**Fixed:** `n_open` ENOENT stub for `p_pid >= 2` (not `>= 1`, and not
+keyed off `bringup_noei` from CODE3).  Sh `.profile` / PATH walks no longer
+reach `i_open(F442)` / `invaliddev`.  `/init` keeps the real walker.
+
+**Also in tree (bring-up only):**
+
+- Sticky `'\n'` in `tty_read` when `bringup_noei` (empty console reads).
+- `map_apply_cached` reinstalls low vectors whenever `bringup_noei`.
+- `_doexec` sets `bringup_noei` *before* `map_proc_always` on the 2nd+
+  exec so that rearm runs on sh's pages (one-shot `seen` was already
+  consumed by `/init`).
+- `_sbrk`/`_brk` no-op for PID≥2 (huge `sbrk(0x75E1)` was wiping RAM with
+  `0x02` after vector loss).
+- COMMONDATA packed to end exactly `0xFF00` (IM2 page); `dbg[]` aliases
+  `exec_diag`; `doexec_arm/seen` are real bytes again (must not share
+  syscall exit probes).
+
+**MAME (`forcev`, sha256
+`93d7dfdd51e59be8693e423233ad99746d76e57bd14988aecda7219e31f3a3c4`):**
+
+```
+t=8   doexec=01  rst38=00  vdev live   ← /init OK
+t=9+  doexec=02 noei=01 rst38=00
+      @0 = BA BA DE DE   @38 = 00..    ← user page0 still not unix
+      callno=1F (sbrk no-op)  HALT=1 PC=6E70 SP=ECFC
+      no more 0x02 memory wipe
+```
+
+So: **past invaliddev**, stable HALT instead of runaway wipe, but user
+`0x0000`/`0x0038` still wrong after sh entry.  Next hypothesis: vector
+writes during doexec/map_apply still hit the wrong physical page, or sh
+overwrites low page before the first syscall return can refresh them.
+
+**Next:**
+
+1. Latch `mpgsel_cache[0]` / `u_page[0]` at the moment of the sh vector
+   write; confirm it is `0x44` not `0x48`.
+2. If page is correct, find what writes `BA BA DE DE` over `C3 xx xx`
+   before t≈9 (sh CRT0 / reloc / first libc).
+3. Keep `rst38=0`, recover from HALT into a live read/write prompt loop.
+
+Dump focus: `@0`/`@38`, `u_page[0]`, `mpgsel_cache[0]`, `seen`/`noei`,
+`callno`/`insys`, `HALT`.
+
+### Update from 2026-07-21 (late): signed sbrk; empty user PROGLOAD
+
+**Root causes found:**
+
+1. **`p_pid >= 2` misses sh** when init `execve`s without fork (PID stays 1).
+   `n_open` stub now uses `spr_doexec_count >= 2`; `sbrk`/`brk`/ioctl
+   bring-up guards use `bringup_noei`.
+2. **Signed `sbrk` guard bug:** `ssize_t inc = 0x75E1` is negative, so
+   `inc > 0x2000` never fired and `uzero` wiped the image.  Under
+   `bringup_noei`, any nonzero `sbrk` / `brk` change now returns `ENOMEM`.
+3. **Best mid checkpoint (`noei_guard`):** `doexec=02`, `brk=73E1`,
+   reaches `ioctl` (`callno=1D`), then RST38 `ret=6502` (CODE1 epilogue
+   with wrong bank — same family as old `6481`).
+4. **`spr_tty_ioctl` no-op + sbrk freeze (`freeze3`, sha256
+   `85323eba5747313b787bb82661d7a4d4eca05f94d3db951bbe87ba021f4eff83`):**
+   `brk` stays `7610`, but user `@100=00` on `mp=44 45 46` — pages look
+   empty after doexec (loader vs `u_page` mismatch, not only sbrk wipe).
+
+**Next:** prove PROGLOAD bytes on `u_page[0]` at `_doexec` entry; if latch
+is good but live `@100` is zero, find the remap; then fix real `tty_ioctl`
+bank restore (prefer over permanent stub).
+
+### Update from 2026-07-21 (evening): PROGLOAD proved; CODE1 patch unsafe
+
+**Proved (MAME `progload` / `c3patch2`):** before `_doexec` of `/bin/sh`,
+`ugetc(PROGLOAD)==0xC3` and `ugetc(PROGLOAD+0x12)==0xD5`, and a WIN1 peek
+of `u_page[0]=0x44` shows `C3 …` / `D5 D9 D1 21`.  Bounce + stubs land on
+the correct physical page.  Empty `@100` after entry is a **post-doexec
+wipe / smash**, not a loader↔`u_page` mismatch.
+
+**Root causes / fixes this round:**
+
+1. **`sprinter_patch_syscalls()` (CODE1) is unsafe after bounce.**  Bounce
+   leaves `_kernel_pages` on CODE3 (`0x4E/0x4F`).  CODE1 `uget`/`uputc`
+   `restore_k12` from that kp unmaps CODE1 mid-patch and corrupts user
+   RAM / COMMONDATA (`doexec=FF`).  Fix: rewrite `CD 00 00 D0`→`CD 00 01
+   D0` **in CODE3** (`syscall_exec16.c`) via `_sprinter_exec_bounce`,
+   after `map_kernel()` re-homes CODE3; then soft-set kp to CODE1
+   (`0x49/0x4A`) without OUT (still in CODE3 until `map_proc_always`).
+2. **Soft-home CODE1 before `doexec`** so the next user→kernel
+   `map_kernel` is not stuck on bounce's CODE3 (the ioctl RST38
+   `ret≈6502` / `6481` family).
+3. **Allowing small `sbrk` regresses:** first `sbrk(0x200)` grows
+   `brk` to `0x7810`, then `u_page` becomes `0xFFFF` (exit-path
+   pattern) and the user map is lost.  Keep full `sbrk`/`brk` freeze
+   under `bringup_noei`.
+
+**Best checkpoint (`c3patch2`, sha256
+`cc5ae3a203665a56e0abc8de5e52d197819ddb8962fb421d281856d6918b6dfa`):**
+
+```
+t=8   doexec=01  done=7500  dbg … C3 D5 44  peekWIN1 @4112=D5D9
+t=9+  doexec=02 noei=01 rst38=00  kp 48 49 4A  brk=7610
+      callno=1F (sbrk ENOMEM)  HALT @6478 SP=ED72
+      u_page 44 45 46 but live @100=00 @0=BA BA DE DE
+```
+
+Past the CODE3-stuck ioctl RST38; `kp` homes CODE1.  Still: user
+PROGLOAD empty / vectors `BA BA` shortly after sh entry + frozen sbrk.
+
+**Next:**
+
+1. Find what zeros page `0x44` / writes `BA BA` after `doexec` (reloc?
+   first libc path?  syscall return `map_proc_always`?).
+2. Keep `rst38=0`, recover a live `write`/`read` loop without wiping
+   PROGLOAD.
+3. Re-enable a safe syscall-site patch only after usermem restore is
+   bank-home aware (or keep the CODE3 walk).
+
+Dump focus: remapped `@100`/`@112`/`@0` with `u_page[0]`, `dbg[9..11]`
+(C3/D5/u0), `kp`, `callno`, `brk`.
+
+### Update from 2026-07-21 (night): wipe is post-sbrk userspace
+
+**Proven with latches (`brklatch` / `poplatch` / `kereloc3` / `dense16`):**
+
+1. Before crt0 `brk`, at `brk` exit, at `sbrk` entry, and at `unix_pop`
+   (last kernel instruction before `ret` to user), `PROGLOAD` is still
+   `0xC3`.  Page0 is alive through the entire kernel side of the first
+   post-entry syscalls.
+2. By the next MAME frame after that `sbrk` return, page0 is empty
+   (`@100=00`) and `@0` is `AC AC DE DE` (was `BA BA DE DE` when unix
+   lived at `F4BA`; `AC` is the low byte of current `unix_syscall_entry`
+   at `F4AC`).  Page1 (`@4100` / `@6478`) stays live.
+3. Kernel-side reloc of V7 sh (`sprinter_apply_user_reloc`, 0x0C81 sites,
+   `reloc=01`, `_doexec` passes `DE=0` so crt0 reloc is a no-op) does
+   **not** stop the wipe.  So the wipe is not the crt0 reloc loop itself.
+4. Window: `t≈12.00` still in `execve` with image live; `t≈12.25`
+   `doexec=02 brk=75E1` and page0 already gone.
+
+**Implication:** something in **user code after the first `sbrk` returns**
+(success or `ENOMEM`) zeros page0 / smashes `@0`.  Candidates: malloc
+`free()` into a bad freelist, libc error path after `sbrk(-1)`, or the
+first real `sh`/`stdio` path with a corrupt pointer.
+
+**Next:**
+
+1. Identify the first user PC after `sbrk` return (MAME breakpoint on
+   user return, or latch user PC into dbg on the first `noei` syscall
+   entry after `sbrk`).
+2. Try skipping/`isatty` short-circuit so malloc is not entered before
+   a known-good `write(1)` from `sh` main.
+3. Keep kernel reloc + `DE=0` (correct addresses, stubs intact) while
+   chasing the post-sbrk writer.
+
+CHD sha256 (kereloc3 / dense16 family):
+`7989646423be13a1b92d32c9bf215a5fe3fd4cdb23fe5bc2904cb2c32abe35ea`.
+
+### Update from 2026-07-22: page0 wipe was lost syscall carry
+
+**Root cause:** Sprinter `unix_pop` tested `_sprinter_bringup_noei` with
+`or a`, which **clears carry** before `ret`.  Libc `__syscall` then treats
+`HL=u_error` as a successful return value.  V7 `setbrk()` compares the
+pointer to `(void *)-1` by value; when it receives `HL=2` (ENOMEM) it
+takes the success path and runs `memset(a, 0, incr)` with a tiny `a` and
+a huge `incr` — that is the page0 wipe (`@100=00`, `@0` smashed).
+
+**Fix:** `push af` / `pop af` around the noei test so error carry survives
+back to userspace (`Kernel/cpu-z80/lowlevel-z80-banked.s`).
+
+**Also this iteration:**
+- `sprinit_raw` no longer aborts on write carry (carry fix exposed sticky
+  write errors that previously looked like success).
+- Synth `/bin/sh` path pointer updated to `0x01C2` (probe shrunk); init
+  synth size `214`.  Do **not** `ugetc()` the path from CODE3.
+- `makebin -o 256` (byte count) for `sprinit_raw` (newer makebin rejects
+  `-o 0x100`).
+
+**Verified (`carryfix5` / `carryfine`):**
+```
+t≈12.10  doexec=02 noei=01  PROGLOAD=C3  @112=D5  write(fd=2) ok
+         brk=73E1  PC=6FD0 (user)  u_page=44 45 46
+t≈12.15  brk grown to 75E2  PROGLOAD still C3  write ok  PC=7252
+t≈12.20  HALT @ plt_monitor  callno=dup(0x11) err=2
+         u_page overwritten to kernel 48 49 4A
+```
+
+Page0 wipe is **gone**.  `/bin/sh` now runs past crt0 `brk`/`sbrk`/
+`setbrk` and issues successful writes, then dies into `_plt_monitor`
+within ~50ms (last udata shows `dup`).
+
+**Next:**
+1. Why PID1/`/bin/sh` reaches `_plt_monitor` after live writes — dump
+   exit path / `dup` failure / `u_page` clobber between t=12.15 and 12.20.
+2. Restore visible console `write(1)` (fd1 path still weak; stderr writes
+   are what we observe).
+3. Keep carry-preserving `unix_pop` — it is a real ABI fix, not a probe.
+
+CHD sha256 (carryfix5 family):
+`fbb0830f62af1fcb51755dbaeeca695084b600793b5e3eb654ae1fd563ed3434`.
+
+### Update from 2026-10-01: banked returns fixed; exec sector mismatch isolated
+
+**Current milestone:** init reaches the second `doexec`, and V7 `fsh` runs
+through heap initialization, real tty ioctls, and a console read. Interactive
+runtime remains unstable. The next blocker is a wrong 512-byte sector in
+the executable image, already present before its first user instruction.
+
+**Retained platform fixes:**
+
+- `sprinter.s:stub_call` now reads the caller's bank after
+  `sanitize_bc_map`, which clobbers A. It selects the BANK1/BANK2/BANK3
+  return path before calling the callee, which can clobber B. Previously,
+  a CODE2 caller could return through CODE3 at its CODE2 return address.
+  The read-only trace showed a successful `sbrk` followed by unrelated
+  writes to `u_error` from the wrong banks, finally returning ENOENT.
+- `main.c:spr_tty_ioctl` calls the real `tty_ioctl` again, with the existing
+  bank wrappers. Its noei success stub is removed. The first observed
+  request `0x000C` is TIOCGPGRP, followed by TCGETS (`1`) and TCSETSW (`3`);
+  the earlier TCGETA description was inaccurate.
+
+No shared kernel code or filesystem packaging changed in this iteration.
+The existing carry-preserving syscall return and other staged bring-up
+changes remain in place. Interrupts are still disabled by the existing
+noei bring-up mode; this is not a release checkpoint.
+
+**Emulator evidence:**
+
+- The old probes that temporarily change MPGSEL and restore kernel pages
+  can disturb a running user process. `mame_runtime.lua` instead reads the
+  MAME RAM save item directly, never changes mappings, and resolves symbols
+  from the current `Kernel/fuzix.map`. Normal CPU memory cycles in this
+  MAME driver have address bit 16 set, so the write taps use `0x10000 +
+  address`. The aliased panic latch is logged as `trace_alias`, not treated
+  as proof of a panic.
+- With the bank fix, `sbrk(0)` returns `73E1`, `sbrk(1)` returns `73E1`,
+  `sbrk(0x200)` returns `73E2`, and `sbrk(2)` returns `75E2`, all with
+  `u_error=0`. The previous out-of-memory messages disappear.
+- Real tty ioctls complete, then `read(0, EDB1, 1)` returns one byte and
+  a newline write completes. Subsequent control flow loses the user stack:
+  user instructions at `10B2`, `1113`, `59B4`, `1115`, and `1118` write
+  into `udata` around `EE02..EE05`. By t=12.206, `u_page` is
+  `18 11 00 00`; the harness stops on invalid user pages.
+- `runtime-entry.bin` is captured at the second `doexec` counter write,
+  before entering userspace. Against the actual loaded binary
+  `Applications/V7/cmd/sh/fsh` (29968 bytes), applying its 3201 relocation
+  sites and the existing libc call-wrapper patch leaves 497 differing
+  bytes in immutable text `0112..6988`. The mismatches are in
+  `2500..26FF`. The later runtime dump has 504 differing bytes.
+- That sector repeats file offset `0x2000` (direct data block 1073),
+  instead of file offset `0x2400` (logical block 18, first indirect data
+  block 1076). In the filesystem image, indirect block 1075 correctly
+  points to 1076, and block 1076 contains the expected source bytes.
+  The corruption is therefore in the load path, not in the source file
+  or image sector. Fixing it is the next prerequisite; whether it explains
+  all later stack corruption remains unverified.
+
+**Discarded experiments:** splitting bounce copies at sector boundaries
+and forcing rereads of every indirect block regressed init. Rereading only
+logical block 18 repaired `2500..26FF` but moved the wrong sector to
+`2700..28FF`. All these changes were reverted; `execbounce.c` is unchanged.
+The sensitivity to extra reads suggests buffer reuse or transfer state at
+the direct-to-indirect transition, but does not yet identify the cause.
+
+**Reproduction and artifacts:**
+
+`make TARGET=sprinter diskimage` completed, including CHD generation.
+The final image was replayed with MAME and the read-only harness:
+
+```sh
+mkdir -p Images/sprinter/mame_out/runtime-baseline
+mame sprinter \
+  -rompath /Users/dmitry/dev/zx/sprinter/mame_images/mame_release_v306_25.05.2025/roms \
+  -hard1 Images/sprinter/fuzix.chd -bios v3.06 \
+  -video none -sound none -nothrottle -skip_gameinfo \
+  -seconds_to_run 30 -autoboot_delay 0 \
+  -autoboot_script Kernel/platform/platform-sprinter/mame_runtime.lua \
+  -snapshot_directory Images/sprinter/mame_out/runtime-baseline \
+  -nvram_directory Images/sprinter/mame_out/runtime-baseline \
+  -diff_directory Images/sprinter/mame_out/runtime-baseline \
+  -cfg_directory Images/sprinter/mame_out/runtime-baseline
+python3 Kernel/platform/platform-sprinter/check_runtime.py \
+  Images/sprinter/mame_out/runtime-entry.bin Applications/V7/cmd/sh/fsh
+```
+
+The comparison deliberately returns status 1 for the known sector mismatch.
+Outputs are `runtime.txt`, `runtime-entry.bin`, and `runtime-memory.bin` in
+`Images/sprinter/mame_out/`; the binary snapshots contain three user windows
+and the live common window. For this build their physical pages are
+`44 45 46 4B`. Failed runs truncate old snapshots rather than reusing them.
+
+SHA256:
+
+- IMG: `6f3ff62c5df9c046b1093a26de0a5176e68a19404889cd640abd29fbb9a7bada`
+- CHD: `8db1ba8db5afd6072b178c18489276158333eee6f228cd37d203105a6399fcf8`
+
+**Next narrow iteration:** trace `bread` buffer identity, `bf_blk`, buffer
+contents, and physical mappings around filesystem blocks 1073, 1075, and
+1076. Check the platform IDE/bounce path before changing shared cache code.
+Keep the pre-entry text comparison as the acceptance check for each replay.
+
+Focused dumps for this build: user `2500..28FF` (physical page `44`),
+`0100..0120`, `1090..1130`, common `ED90..EE30` (stack/udata), and
+`FEC0..FEFF` (mapping cache and trace latches). `udata=EE00`,
+`mpgsel_cache=FEC0`, `_kernel_pages=FEC4`, `_spr_doexec_count=FED5`, and
+`_sprinter_dbg=FED8`; resolve these again after any rebuild.
+
+### Update from 2026-10-02: correct IM2 vectors; interactive builtin works
+
+**Current milestone:** the pre-entry executable text matches the loaded V7
+`fsh` exactly. Real PS/2 input reaches the shell, `set` prints IFS/PS1/PS2,
+and the shell returns to a blocking one-byte console read. This is a PID1
+bring-up checkpoint, not a working multi-process system or release build.
+
+**Root cause of the exec sector mismatch:** the old IM2 setup filled
+`FF00..FFFF` with `FD` but installed its JP at `FFFD`. Repeated `FD` bytes
+resolve to `FDFD`, not `FFFD`. Furthermore, external Sprinter interrupts
+supply vector `FF`: the vector word spans `FFFF` and `0000`. With the
+installed handler address and the low-memory JP opcode, that fetch jumped
+to `C3F1`, into the boot path. During the first indirect data read (block
+1076, file offset `2400`), the trace recorded boot-console calls, a change
+to CODE1, and an IDE return of `0006` without replacing the old buffer
+contents. The cache then associated block 1076 with the bytes of block 1073.
+No cache or bounce-loader rewrite was needed.
+
+The local primary references agree with this mechanism:
+
+- `sprinter_ai_doc/manual/09_advanced/01_interrupts.md` describes the
+  257-byte IM2 table, including odd vectors.
+- `mame/src/mame/sinclair/sprinter.cpp:set_irq_acknowledge_callback` returns `FF` for the
+  external IRQ source; the Z80 IM2 implementation reads the complete
+  eight-bit vector and the following byte.
+
+**Retained changes:**
+
+- `sprinter.s:init_hardware` uses the unused common-memory gap below
+  discard (`s__DISCARD=C300`): 257 `C1` bytes at `C000..C100`, a JP at
+  `C1C1..C1C3`, and `I=C0`. All 256 vector values point to `C1C1`, without
+  wrapping into WIN0 or overwriting `__uget`. The existing IRQ absorber
+  is unchanged and still leaves IFF1 clear. Keep this gap reserved if the
+  linker layout changes.
+- `usermem.s:__uget` preserves AF across `restore_k12`. The helper uses A
+  to restore MPGSEL_1/2; previously every copied byte became the final
+  WIN2 page number (`4D` during TCSETSW). Thus the real ioctl wrote
+  `4D4D` into TTY flags, including IGNCR, and Enter was discarded.
+  After the fix, the shell's input/local flags are `0003`/`0066`, Enter
+  becomes a newline, and only the shell echoes its input.
+- Removed the temporary empty-queue newline injection from `Kernel/tty.c`.
+  With the executable repaired, it made the shell spin through empty
+  commands and grow its heap instead of waiting for keyboard input.
+- Corrected the existing `CONFIG_SPRINTER_EARLY_TRACE` sbrk guard in
+  `Kernel/syscall_proc.c` to limit positive growth only. V7 shell's
+  `stakchk()` legitimately requests `sbrk(-512)` after a command. The
+  unsigned guard rejected this as huge growth and printed "Out of memory."
+  Normal signed wrap checks and `brk_extend` bounds remain in effect.
+
+The two shared-file edits only change temporary Sprinter diagnostics;
+both are under `CONFIG_SPRINTER_EARLY_TRACE`. No shared production path,
+filesystem packaging, or application source changed in this iteration.
+
+**Probe corrections and new tools:**
+
+- `mame_runtime.lua` now obtains every byte from the RAM save item.
+  Even Lua address-space reads invoke Sprinter's wait/accelerator handlers
+  and can perturb execution; the previous helper still used those reads.
+  This helper uses the mapping cache on physical page `4B` and assumes
+  live common/stack memory is on `4B`, as verified for this PID1 checkpoint.
+  It must be extended to follow actual hardware mappings before relying
+  on common-memory snapshots during fork/context switches.
+- `mame_loadtrace.lua` adds buffer identities, block numbers, prefixes,
+  transfer entry/stack observations, and bank changes around file offset
+  `2400`. It uses RAM save-item reads and resolves addresses from the map.
+- `mame_console.lua` selects the emulated PS/2 keyboard, posts
+  `set{ENTER}` at t=13, and records received scan bytes plus TTY flags in
+  `console-scancodes.txt`; `console-input.txt` records enabled devices.
+  `FUZIX_MAME_COMMAND` can override the coded input string. It does not
+  alter RAM, enqueue fake input, or force syscall success.
+
+**Validation on the final IMG/CHD:**
+
+- `make TARGET=sprinter diskimage` completed, including CHD conversion.
+- `check_runtime.py runtime-entry.bin Applications/V7/cmd/sh/fsh` passes:
+  3201 relocation sites, immutable text `0112..6988`, **0 differing bytes**.
+- The saved common page contains all 257 `C1` vector bytes and the JP at
+  `C1C1`; checking all 256 adjacent-byte vector words resolves to `C1C1`.
+- Without posted input, the shell waits in read until t=25.006 with
+  `brk=75E4`, no HALT, no invalid user pages, and no memory error.
+- In the final input replay the keyboard emits two complete `set` make /
+  break sequences (not release bytes misdecoded as extra presses).
+  Both commands print the variables and return to `#`. The reason for
+  this MAME posting duplication is not yet isolated; this replay checks
+  repeated command handling, not one-post/one-command correspondence.
+- The first command grows the break from `75E4` to `7AE4`, then
+  `sbrk(FE00)` successfully returns `7AE4` and shrinks it to `78E4`.
+  At t=25.006 it remains `78E4`, `u_error=0`, user pages `44 45 46 47`,
+  live common `4B`, `I=C0`, `IM=2`, and IFF1/IFF2 both zero.
+- `git diff --check` passes. Other-target compilation was not required
+  for these platform fixes and guarded diagnostic changes.
+
+Use the previous update's MAME command with
+`-autoboot_script Kernel/platform/platform-sprinter/mame_console.lua` for
+the input replay, or keep `mame_runtime.lua` for idle-only observation.
+Final artifacts are `Images/sprinter/fuzix.img`, `fuzix.chd`, and
+`Images/sprinter/mame_out/{runtime.txt,runtime-entry.bin,runtime-memory.bin}`.
+The earlier idle log is saved as `mame_out/runtime-baseline/im2-idle.txt`;
+it predates the uget/sbrk corrections. Final SHA256:
+
+- IMG: `32d1742e2092d7b2b030cd95f75a703bbf3d82f620812eb5c6c43e38f0a723b9`
+- CHD: `efc8d8243a8fec09c2ddd5a19254ff5602e3be75b8bac14d66523a58f3698cfa`
+
+**Next confirmed blocker:** an additional `echo` command reaches syscall
+`20` (fork) and stops at t=15.626, `PC=F22C`, `SP=EFD7`, with the mapping
+cache showing WIN3=`43`. V7 `echo` is an external command, so this tests
+fork rather than a builtin. The trace is saved separately as
+`mame_out/runtime-baseline/fork-probe.txt` and `fork-scancodes.txt`.
+The uppercase/underscore input in that experiment arrived as lowercase
+without the underscore; modifier posting also needs a separate check.
+Do not infer the active common-page contents from this harness's fixed
+`4B` reads once fork starts. Investigate `tricks.s:_dofork` / fork copying
+and common-page restoration before removing the filesystem open guard,
+hardcoded shell-block loader, or noei mode.
+
+Focused next-run dumps: physical pages **43 and 4B**, each at logical
+`EE00..EFFF` (udata/stack), `FA2E..FC20` (switch/fork code and latches),
+and `FEC0..FEFF` (mapping/debug state); also `F210..F240` around the halt
+and WIN0 physical page **48**, `3D80..3DFF` around the reported return.
+Capture PC/SP, all four actual MPGSEL values, I/IM/IFF1/IFF2, and
+`C000..C100`/`C1C1..C1C3` in both common pages. Current map symbols:
+`udata=EE00`, `_dofork=FB51`, `_switchin=FA66`,
+`mpgsel_cache=FEC2`, `_kernel_pages=FEC6`, `_spr_doexec_count=FED7`,
+`_sprinter_dbg=FEDA`; resolve them again after rebuilding.
