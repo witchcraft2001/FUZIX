@@ -24,27 +24,15 @@ struct blkbuf *bufpool_end = bufpool + NBUFS;
 
 void plt_idle(void)
 {
-	/*
-	 * Bring-up idle: poll the keyboard and advance timer ticks in
-	 * software rather than blocking on HALT.  The bring-up IRQ
-	 * dispatcher in sprinter.s absorbs every interrupt (it RETIs
-	 * without EI so IFF1 stays cleared) so a HALT here would never
-	 * wake back up.  Mirror the zx128 pattern of polling the
-	 * tty/timer directly from the idle loop until the kernel IRQ
-	 * path is fully plumbed.
-	 */
+	extern void spr_idle_wait(void);
+
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_rw_stage = 0xD6;
-	/*
-	 * Keep idle-time kbd_poll suppressed: spurious PS/2 bytes still
-	 * decode into random shell input and i_open panics.  Interactive
-	 * tty waits for PID1 poll the keyboard from do_psleep() instead.
-	 */
-	spr_rw_stage = 0xD7;
-#else
-	kbd_poll();
 #endif
-	timer_interrupt();
+#ifdef CONFIG_SPRINTER_EARLY_TRACE
+	spr_rw_stage = 0xD7;
+#endif
+	spr_idle_wait();
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	spr_rw_stage = 0xD8;
 #endif
@@ -60,19 +48,12 @@ extern void kbd_poll(void);
 
 void plt_interrupt(void)
 {
-	/*
-	 * 50 Hz timer tick: advance FUZIX scheduler time and poll the
-	 * PS/2 keyboard.  The bring-up dispatcher in sprinter.s reaches
-	 * here only when u_insys == 0 (user code was running); that is
-	 * sufficient to unblock a process that sleep()ed from user
-	 * space.  For kernel-side waits (plt_idle), the dispatcher
-	 * currently absorbs the IRQ — revisit once the ULA FRAME
-	 * acknowledgement is understood.
-	 */
+	extern uint8_t spr_idle_irq;
+
 	timer_interrupt();
-#ifndef CONFIG_SPRINTER_EARLY_TRACE
-	kbd_poll();
-#endif
+	/* Kernel console output is not reentrant with keyboard echo. */
+	if (!udata.u_insys || spr_idle_irq)
+		kbd_poll();
 }
 
 /*

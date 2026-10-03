@@ -4,13 +4,11 @@ package platform-sprinter
 # the disk image for the Sprinter target.
 disable-pkg platform-sprinter
 
-# Temporary bring-up override: boot into a tiny Sprinter-only userspace probe
-# instead of the full SysV-style /init.
-# sprinit_raw is linked at PROGLOAD (a_base=1) so absolute labels do not
-# smash the low-page vectors (the old 0x0000-base build wrote into 0x00xx).
+# Stock init with one console; /etc/rc waits for writable-root validation.
 r /init
-f 0755 /init          ../../../Applications/util/sprinit_raw
+f 0755 /init          ../../../Applications/util/init
+f 0644 /etc/inittab   inittab
 
-# Keep the verified V7 fsh at the path used by the boot probe.
+# Keep the verified V7 fsh for the login shell.
 r /bin/sh
 f 0755 /bin/sh        ../../../Applications/V7/cmd/sh/fsh

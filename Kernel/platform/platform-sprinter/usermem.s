@@ -28,6 +28,8 @@
 	.globl _udata
 	.globl mpgsel_cache
 	.globl _kernel_pages
+	.globl spr_irq_ret
+	.globl banksetbc
 
         .area _COMMONMEM
 
@@ -42,14 +44,19 @@
 ; (stub home).  Restoring that stale cache after uputw(TIOCGPGRP→EDE4)
 ; remapped WIN1/2 to CODE3 and the ioctl epilogue at 0x6480 hit RST38.
 ; Restore WIN1/WIN2 from C/B via A; preserve IRQ state, clobber A.
+; COMMONMEM / WIN3 stack. Only cache/OUT commits are IRQ-masked;
+; copying can be interrupted with a complete temporary user mapping.
 restore_k12:
+	ld a, i
+	di
+	push af
 	ld (mpgsel_cache + 1), bc
 	ld a, c
 	out (MPGSEL_1), a
 	ld a, b
 	ld (mpgsel_cache + 2), a
 	out (MPGSEL_2), a
-	ret
+	jp spr_irq_ret
 
 ; Load stub-home WIN1/2 into BC (clobbers A).
 save_k12:
@@ -69,8 +76,12 @@ user_map_de:
 	ld a, d
 	cp #0xC0
 	ret nc
+	ld a, i
+	di
+	push af
 	push bc
 	push hl
+	ld a, d
 	rlca
 	rlca
 	and #3
@@ -113,7 +124,7 @@ um_b2_ok:
 	and #0x3F
 	add #0x40
 	ld d, a
-	ret
+	jp spr_irq_ret
 
 
 __uzero:
@@ -128,7 +139,6 @@ __uzero:
 	ld a, b
 	or c
 	ret z
-	di
 uzero_l:
 	push bc
 	push hl
@@ -158,7 +168,6 @@ __uputc:
 	push de
 	push bc
 	push iy
-	di
 	ld a, h
 	cp #0xC0
 	jr nc, uputc_common
@@ -201,7 +210,6 @@ __uputw:
 	push de
 	push bc
 	push iy
-	di
 	ld a, h
 	cp #0xC0
 	jr nc, uputw_common
@@ -233,13 +241,7 @@ uputw_common:
 	cp #0x1D
 	jr nz, uputw_ok
 	ld bc, #0x4A49			; MAP_BANK1
-	ld (_kernel_pages + 1), bc
-	ld (mpgsel_cache + 1), bc
-	ld a, c
-	out (MPGSEL_1), a
-	ld a, b
-	ld (mpgsel_cache + 2), a
-	out (MPGSEL_2), a
+	call banksetbc
 uputw_ok:
 	ld hl, #0
 	ret
@@ -247,7 +249,6 @@ uputw_ok:
 __ugetc:
 	push bc
 	push de
-	di
 	ld e, l
 	ld d, h
 	ld a, d
@@ -273,7 +274,6 @@ ugetc_common:
 __ugetw:
 	push bc
 	push de
-	di
 	ld e, l
 	ld d, h
 	ld a, d
@@ -330,7 +330,6 @@ _spr_uput_win0:
 	ld a, b
 	or c
 	jr z, suw_out
-	di
 	push hl
 	call save_k12
 	push bc
@@ -354,7 +353,6 @@ __uput:
 	add ix, sp
 	call uputget
 	jr z, uput_out
-	di
 uput_l:
 	ld a, (hl)
 	inc hl
@@ -386,7 +384,6 @@ __uget:
 	add ix, sp
 	call uputget
 	jr z, uget_out
-	di
 uget_l:
 	push bc
 	push de

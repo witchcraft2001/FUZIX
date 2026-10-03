@@ -105,10 +105,6 @@ static uaddr_t progptr, old_progptr;
 static uaddr_t argptr, old_argptr;
 
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-extern uint8_t spr_common_init_path[];
-extern uint8_t *spr_common_init_argv[];
-extern uint8_t *spr_common_init_envp[];
-
 static void sprinter_prepare_init_stdio(void)
 {
 	uint8_t old_sysio = udata.u_sysio;
@@ -273,17 +269,9 @@ void rebuild_init_argv(void)
 void complete_init(void)
 {
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/*
-	 * Sprinter bring-up: the initial PID1 user-space argv staging still
-	 * traps in add_argument()/uput before the real exec loader starts.
-	 * Hand _execve() common-memory-resident "/init", argv[] and envp[]
-	 * under u_sysio so the next failure edge moves into the actual exec
-	 * path without depending on the current code bank mapping.
-	 */
-	udata.u_sysio = 1;
-	udata.u_argn2 = (arg_t)spr_common_init_envp;
-	udata.u_argn = (arg_t)spr_common_init_path;
-	udata.u_argn1 = (arg_t)spr_common_init_argv;
+	/* Boot scratch in WIN0 is ready after the kernel and root are mapped. */
+	rebuild_init_argv();
+	udata.u_sysio = 0;
 #else
 	/* Terminate argv, also use this as the env ptr */
 	uputp(0, (void *)argptr);

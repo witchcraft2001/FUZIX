@@ -3,6 +3,7 @@ local root = os.getenv("FUZIX_ROOT") or "."
 local out = os.getenv("FUZIX_MAME_OUT") or root .. "/Images/sprinter/mame_out"
 local stop_time = tonumber(os.getenv("FUZIX_MAME_STOP")) or 25
 local followup = os.getenv("FUZIX_MAME_FOLLOW") or "set{ENTER}"
+local follow_time = tonumber(os.getenv("FUZIX_MAME_FOLLOW_TIME")) or 18
 local symbols = {}
 for line in io.lines(root .. "/Kernel/fuzix.map") do
     local addr, name = line:match("^%s+([%x]+)%s+([_%w]+)%s+")
@@ -45,7 +46,7 @@ local taps, armed, saved, followed
 emu.register_frame(function()
     local t = manager.machine.time:as_double()
     if t < 7 then return end
-    if armed and not followed and t >= 18 and not manager.machine.natkeyboard.is_posting then
+    if armed and not followed and t >= follow_time and not manager.machine.natkeyboard.is_posting then
         followed = true
         log:write("followup: " .. followup .. "\n")
         manager.machine.natkeyboard:post_coded(followup)
@@ -85,7 +86,9 @@ emu.register_frame(function()
         rb(ud + 6) == 1 and proc >= assert(symbols._ptab) and proc < 0x4000 and
         (state == 7 or (state == 1 and rb(ud + 7) == 0))
     local invalid = armed and not released and (rb(ud + 2) < 8 or rb(ud + 2) >= 0x40)
-    if not saved and (cpu.state.HALT.value ~= 0 or invalid or t >= stop_time) then
+    local idle_halt = symbols.spr_idle_halt
+    local idle = idle_halt and (cpu.state.PC.value == idle_halt or cpu.state.PC.value == idle_halt + 1)
+    if not saved and ((cpu.state.HALT.value ~= 0 and not idle) or invalid or t >= stop_time) then
         saved = true
         record("stop")
         for p = 0x30, 0x4F do

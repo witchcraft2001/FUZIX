@@ -1,4 +1,4 @@
-ASRCS = crt0.s tricks.s commonmem.s sprinter.s sprvideo.s usermem.s
+ASRCS = crt0.s tricks.s commonmem.s sprinter.s sprvideo.s usermem.s lowlevel.s
 CSRCS = devices.c main.c ide.c
 DISCARD_CSRCS = discard.c
 DISCARD_DSRCS = ../../dev/tinyide_discard.c
@@ -19,12 +19,15 @@ OBJS  = $(AOBJS) $(COBJS) $(C3OBJS) $(C4OBJS) $(DOBJS) $(DISCARD_DOBJS) $(DISCAR
 
 CROSS_CCOPTS += -I../../dev/
 
-JUNK = *.rel *.lst *.asm *.sym *.rst *.map *.ihx *.bin
+JUNK = *.rel *.lst *.asm *.sym *.rst *.map *.ihx *.bin lowlevel.s
 
 all:	$(OBJS)
 
 $(AOBJS): %.rel: %.s
 	$(CROSS_AS) $(ASOPTS) $<
+
+lowlevel.s: ../../cpu-z80/lowlevel-z80-banked.s build_lowlevel.py
+	python3 build_lowlevel.py $< $@
 
 $(COBJS): %.rel: %.c
 	$(CROSS_CC) $(CROSS_CCOPTS) $(CROSS_CC_SEG1) -c $<

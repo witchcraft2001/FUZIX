@@ -31,6 +31,7 @@
         .globl _vtattr_notify
         .globl _vtattr_cap
         .globl mpgsel_cache
+        .globl spr_irq_ret
         .globl _sprinter_dbg
 
         .include "kernel.def"
@@ -61,6 +62,11 @@ VRAM_TEXT	.equ	0x50
 ; reentrantly while VRAM is mapped, so a single scalar is enough.
 ;----------------------------------------------------------------------
 map_vr:
+        ; WIN0 code / WIN3 stack. Mask cache/MPGSEL_2/depth updates,
+        ; then restore IFF2; kernel IRQs service only the timer here.
+        ld a, i
+        di
+        push af
         ld a, (map_vr_depth)
         or a
         jr nz, map_vr_nested
@@ -74,19 +80,23 @@ map_vr:
 map_vr_nested:
         ld hl, #map_vr_depth
         inc (hl)
-        ret
+        jp spr_irq_ret
 
 ;----------------------------------------------------------------------
 ; unmap_vr: restore WIN2 page saved by map_vr
 ; Destroys: A
 ;----------------------------------------------------------------------
 unmap_vr:
+        ; WIN0 code / WIN3 stack. Restore WIN2 atomically with its cache.
+        ld a, i
+        di
+        push af
         ld a, (map_vr_depth)
         or a
-        ret z
+        jr z, unmap_vr_done
         dec a
         ld (map_vr_depth), a
-        ret nz
+        jr nz, unmap_vr_done
         ld a, (saved_vr_page)
         cp #0x50
         jr c, unmap_vr_ok
@@ -94,7 +104,8 @@ unmap_vr:
 unmap_vr_ok:
         out (MPGSEL_2), a
         ld (mpgsel_cache + 2), a
-        ret
+unmap_vr_done:
+        jp spr_irq_ret
 
 ;----------------------------------------------------------------------
 ; cell_hl: set RGADR and compute char address for cell (D=col, E=row)

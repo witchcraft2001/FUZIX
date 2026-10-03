@@ -44,9 +44,6 @@ extern uint16_t spr_doexec_isp;
 extern uint8_t spr_doexec_call_seen;
 extern uint16_t spr_doexec_call_sp;
 extern uint16_t spr_doexec_call_start;
-extern uint8_t spr_common_init_path[];
-extern uint8_t *spr_common_init_argv[];
-extern uint8_t *spr_common_init_envp[];
 #define PROC_TRACE(x) plt_trace(x)
 static bool sprinter_proc_inode_ptr_valid(inoptr ino)
 {
@@ -1370,10 +1367,6 @@ void exec_or_die(void)
 	plt_discard();
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
 	sprinter_bootmark('h');
-	udata.u_sysio = 1;
-	udata.u_argn = (arg_t)spr_common_init_path;
-	udata.u_argn1 = (arg_t)spr_common_init_argv;
-	udata.u_argn2 = (arg_t)spr_common_init_envp;
 	if (sprinter_proc_inode_ptr_valid(root)) {
 		if (!sprinter_proc_inode_ptr_valid(udata.u_root))
 			udata.u_root = i_ref(root);

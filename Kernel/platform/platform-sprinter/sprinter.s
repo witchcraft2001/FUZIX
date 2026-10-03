@@ -40,6 +40,17 @@
 	.globl _spr_doexec_count
 	.globl _sprinter_psleep_tty_ei
 	.globl _sprinter_psleep_maybe_ei
+	.globl _spr_idle_wait
+	.globl spr_idle_halt
+	.globl _spr_doexec
+	.globl _spr_user_ret
+	.globl spr_map_return
+	.globl _doexec
+	.globl _spr_irq_gate
+	.globl _spr_idle_irq
+	.globl spr_irq_ret
+	.globl spr_irq_end
+	.globl banksetbc
 	.globl _sprinter_trace_last
 		.globl _sprinter_nullh_count
 		.globl _sprinter_null_sp0
@@ -48,9 +59,6 @@
 		.globl _sprinter_trace_buf
 		.globl _sprinter_dbg
 		.globl _spr_initmsg
-	.globl _spr_common_init_path
-	.globl _spr_common_init_argv
-	.globl _spr_common_init_envp
 	.globl _spr_nopen_name
 	.globl _spr_nopen_nameend
 		.globl _sprinter_ide_bounce
@@ -464,6 +472,93 @@ sprinter_bringup_int:
 	pop af
 	reti
 
+; COMMONMEM / WIN3 stack; no mapping changes. The idle caller has no
+; runnable task. EI's shadow makes HALT atomic with respect to IRQ accept;
+; DI closes the wait after either IRQ dispatcher. Return with IRQs disabled.
+_spr_idle_wait:
+	di
+	ld a, #1
+	ld (spr_idle_irq), a
+	ei
+spr_idle_halt:
+	halt
+	di
+	xor a
+	ld (spr_idle_irq), a
+	ret
+
+; COMMONMEM / interrupted stack; mapping helpers mask their transitions.
+_spr_irq_gate:
+	jp interrupt_handler
+
+; COMMONMEM / WIN3 stack. Mapping helpers save LD A,I flags before DI.
+; Restore the caller's IFF2 without enabling IRQs inside an IRQ or lock.
+spr_irq_ret:
+	pop af
+spr_irq_end:
+	ret po
+	ei
+	ret
+
+; Same stack contract, with the caller's original AF below IFF2 flags.
+spr_map_exit:
+	pop af
+	jp po, spr_map_di
+	pop af
+	ei
+	ret
+spr_map_di:
+	pop af
+	ret
+
+; COMMONMEM / WIN3 user stack. The diagnostic noei flag stays set;
+; enable IRQs only after registers and the user mapping are restored.
+_spr_user_ret:
+	push af
+	xor a
+	ld (_int_disabled), a
+	pop af
+	ei
+	ret
+
+; COMMONMEM / WIN3 stack; map_proc_always installs user WIN0..2.
+; SDCC's direct call has a saved AF word before its entry argument.
+; Activate the real IM2 handler only after the first exec has finished.
+_doexec:
+_spr_doexec:
+	di
+	ld a, #1
+	ld (_sprinter_bringup_noei), a
+	call map_proc_always
+	pop bc
+	pop af
+	pop de
+	ld hl, (_udata + U_DATA__U_ISP)
+	ld sp, hl
+	xor a
+	ld (_udata + U_DATA__U_INSYS), a
+	ld (_int_disabled), a
+	ex de, hl
+	ld d, h
+	ld e, #0
+	.globl _spr_reloc_done
+	ld a, (_spr_reloc_done)
+	or a
+	jr z, spr_exec_base
+	ld de, #0
+spr_exec_base:
+	push hl
+	ld hl, #_spr_irq_gate
+	ld (0xE1E2), hl
+	pop hl
+	ld a, #0xDD
+	ld (_sprinter_dbg + 15), a
+	ld a, (_spr_doexec_count)
+	inc a
+	ld (_spr_doexec_count), a
+	ei
+	jp (hl)
+
 ;=========================================================================
 ; sprinter_psleep_tty_ei / sprinter_psleep_maybe_ei
 ;
@@ -660,13 +755,17 @@ null_hang:
 ;     map_buffers, transfer, then restore kernel mapping.
 ;   - for td_raw == 1 (user) / 2 (swap) map target view first, read/write
 ;     directly via (HL), then restore kernel mapping.
+; COMMONMEM / WIN3 stack. Preserve IFF2 around the whole transfer and
+; mapping changes; an IRQ-locked caller must not be re-enabled here.
 ; Removing the _sprinter_ide_bounce / ldir dance eliminates the window
 ; between the two 256-byte halves where banking and kstack could drift;
 ; this mirrors HDRIVER6's "DI, map target into WIN3, tight INI loop, EI"
 ; idiom without moving MPGSEL_3.
 _devide_read_data:
-        di
-	ld hl, #4
+	ld a, i
+	di
+	push af
+	ld hl, #6
 	add hl, sp
 	ld e, (hl)
 	inc hl
@@ -701,12 +800,13 @@ ide_rd_xfer:
 	inir
 	call map_kernel_restore
 ide_rd_done:
-	ei
-	ret
+	jp spr_irq_ret
 
 _devide_write_data:
+	ld a, i
 	di
-	ld hl, #4
+	push af
+	ld hl, #6
 	add hl, sp
 	ld e, (hl)
 	inc hl
@@ -741,8 +841,7 @@ ide_wr_xfer:
 	otir
 	call map_kernel_restore
 ide_wr_done:
-	ei
-	ret
+	jp spr_irq_ret
 
 ;=========================================================================
 ; program_vectors - set exception vectors for a new process
@@ -949,7 +1048,7 @@ map_apply_pophl:
 ; COMMONMEM / live WIN3 stack. Syscall entry has already set u_insys;
 ; reset write progress before readwrite's zero-length/error early returns.
 ; The bring-up return guard must not reuse the preceding write's u_done.
-; Preserve AF and IRQ state, then map WIN0/1/2 through map_kernel below.
+; Preserve AF and IRQ state, then atomically map WIN0/1/2 below.
 map_kernel_di:
 	push af
 	ld a, (_udata + U_DATA__U_INSYS)
@@ -974,6 +1073,9 @@ map_kernel:
 map_buffers:
 map_kernel_restore:
 	push af
+	ld a, i
+	di
+	push af
 	; WIN0 must always be kernel CODE (0x48).  _kernel_pages[0] can hold
 	; a user page after map_proc; remapping that hides i_tab → iobad.
 	ld a, #0x48
@@ -986,8 +1088,7 @@ map_kernel_restore:
 	ld a, (_kernel_pages + 2)
 	ld (mpgsel_cache + 2), a
 	out (MPGSEL_2), a
-	pop af
-	ret
+	jp spr_map_exit
 
 ; Remap WIN0 to kernel CODE only.  Must live in common: callers invoke this
 ; while WIN0 still holds the user page after readi/uput.  Do NOT touch WIN1/2
@@ -995,12 +1096,14 @@ map_kernel_restore:
 	.globl _spr_map_win0_k
 _spr_map_win0_k:
 	push af
+	ld a, i
+	di
+	push af
 	ld a, #0x48
 	ld (_kernel_pages), a
 	ld (mpgsel_cache), a
 	out (MPGSEL_0), a
-	pop af
-	ret
+	jp spr_map_exit
 
 pv_program_vectors_common:
 	ld a, h
@@ -1106,7 +1209,8 @@ pv_kb0_ok:
 ;=========================================================================
 ; map_proc_always - map process pages
 ; Inputs: page table address in #U_DATA__U_PAGE
-; Outputs: none; all registers preserved
+; Caller has IRQs disabled; WIN0 code hands off to common after filling
+; the cache. The user mapping must be complete before IRQs are enabled.
 ;=========================================================================
 map_proc_always:
 map_proc_save:
@@ -1181,13 +1285,7 @@ map_proc_di:
 
 _sprinter_force_bank1:
 	ld bc, #MAP_BANK1
-	ld (_kernel_pages + 1), bc
-	ld (mpgsel_cache + 1), bc
-	ld a, c
-	out (MPGSEL_1), a
-	ld a, b
-	call set_mpgsel2_safe
-	ret
+	jp banksetbc
 
 ;=========================================================================
 ; map_proc_2 - map process or kernel pages
@@ -1417,16 +1515,37 @@ sanitize_kpages_bad:
 	out (MPGSEL_3), a
 	ret
 
-;=========================================================================
-; map_restore - restore a saved page mapping
-;=========================================================================
-map_restore:
-	push hl
-	ld hl, #map_savearea
-	jp map_proc_2_pophl_ret
+	.area _COMMONMEM
 
 ;=========================================================================
-; map_save_kernel - save the current page mapping and switch to kernel
+; COMMONMEM / IRQ stack. Restore WIN0..2 and banked-call state exactly,
+; including temporary VRAM mappings. IRQs stay disabled; WIN3 is unchanged.
+;=========================================================================
+map_restore:
+	push af
+	push hl
+	ld hl, (map_savkern)
+	ld (_kernel_pages), hl
+	ld a, (map_savkern + 2)
+	ld (_kernel_pages + 2), a
+	ld hl, (map_savearea)
+	ld (mpgsel_cache), hl
+	ld hl, (map_savearea + 2)
+	ld (mpgsel_cache + 2), hl
+	ld a, (map_savearea)
+	out (MPGSEL_0), a
+	ld a, (map_savearea + 1)
+	out (MPGSEL_1), a
+	ld a, (map_savearea + 2)
+	out (MPGSEL_2), a
+	pop hl
+	pop af
+spr_map_return:
+	ret
+
+;=========================================================================
+; COMMONMEM / IRQ stack. Save WIN0..2 plus the logical banked-call map;
+; install kernel WIN0 and CODE1 in WIN1..2. IRQs stay off; WIN3 is unchanged.
 ;=========================================================================
 map_save_kernel:
 	push hl
@@ -1434,8 +1553,17 @@ map_save_kernel:
 	ld (map_savearea), hl
 	ld hl, (mpgsel_cache+2)
 	ld (map_savearea+2), hl
-	ld hl, #_kernel_pages
-	jp map_proc_2_pophl_ret
+	ld hl, (_kernel_pages)
+	ld (map_savkern), hl
+	ld a, (_kernel_pages + 2)
+	ld (map_savkern + 2), a
+	ld hl, #MAP_BANK1
+	ld (_kernel_pages + 1), hl
+	call map_kernel
+	pop hl
+	ret
+
+	.area _CODE
 
 ;=========================================================================
 ; map_proc_save_u / map_kernel_restore_u - usermem private save/restore
@@ -1503,6 +1631,13 @@ map_kernel_restore_u_fallback:
 ; Outputs: none
 ;=========================================================================
 map_for_swap:
+	; WIN0 code / WIN3 stack. Preserve BC and IFF2 while updating WIN1.
+	push bc
+	ld c, a
+	ld a, i
+	di
+	push af
+	ld a, c
 	cp #0x08
 	jr c, map_for_swap_bad
 	cp #0x50
@@ -1512,7 +1647,11 @@ map_for_swap_bad:
 map_for_swap_ok:
 	ld (mpgsel_cache + 1), a
 	out (MPGSEL_1), a
-	ret
+	ld c, a
+	pop af
+	ld a, c
+	pop bc
+	jp spr_irq_end
 
 ;=========================================================================
 ; _copy_common - copy the common page to a new physical page
@@ -1722,15 +1861,10 @@ bank0:
 	inc hl
 	push hl
 	ld a, (_kernel_pages + 1)
-	ld (_kernel_pages + 1), bc
-	ld (mpgsel_cache + 1), bc
-	ld b, a
-	ld a, c
-	out (MPGSEL_1), a
-	inc a
-	call set_mpgsel2_safe
+	push af
+	call banksetbc
+	pop af
 	ex de, hl
-	ld a, b
 	cp #BANK1
 	jr z, retbank1
 	cp #BANK2
@@ -1739,6 +1873,11 @@ bank0:
 	; BANK3 and unknown: restore CODE3 (bounce/execve home).
 	ld bc, #MAP_BANK3
 banksetbc:
+	; WIN0 code / WIN3 stack. Commit logical/cache/WIN1..2 as one
+	; IRQ-masked transition; leave HL/DE and the caller's IFF2 intact.
+	ld a, i
+	di
+	push af
 	call sanitize_bc_map
 	ld (_kernel_pages + 1), bc
 	ld (mpgsel_cache + 1), bc
@@ -1746,7 +1885,7 @@ banksetbc:
 	out (MPGSEL_1), a
 	ld a, b
 	call set_mpgsel2_safe
-	ret
+	jp spr_irq_ret
 retbank1:
 	call callhl
 	ld bc, #MAP_BANK1
@@ -1833,20 +1972,13 @@ __stub_2_3:
 stub_call:
 	pop hl
 	ex (sp), hl
-	call sanitize_bc_map
-	; COMMONMEM, stack in WIN3: switch WIN1/2 with BC, preserving
-	; IRQ state.  Classify the caller before the callee clobbers BC;
-	; sanitize_bc_map also destroys A, so read the caller bank after it.
+	; WIN0 code, stack in WIN3: switch WIN1/2 with BC, preserving
+	; IRQ state. Classify the caller before the callee clobbers BC.
 	ld a, (_kernel_pages+1)
-	ld (_kernel_pages+1), bc
-	ld (mpgsel_cache + 1), bc
-	ld b, a
-	ld a, c
-	out (MPGSEL_1), a
-	inc a
-	call set_mpgsel2_safe
+	push af
+	call banksetbc
+	pop af
 	ex de, hl
-	ld a, b
 	cp #BANK1
 	jr z, stub_ret_1
 	cp #BANK2
@@ -1858,13 +1990,7 @@ stub_ret_2:
 	call callhl
 	ld bc, #MAP_BANK2
 stub_ret:
-	call sanitize_bc_map
-	ld (_kernel_pages+1), bc
-	ld (mpgsel_cache + 1), bc
-	ld a, c
-	out (MPGSEL_1), a
-	ld a, b
-	call set_mpgsel2_safe
+	call banksetbc
 	pop bc
 	push bc
 	push bc
@@ -1934,16 +2060,6 @@ set_mpgsel2_ok:
 _spr_initmsg:
 		.db 'i','n','i','t',0x0A,0
 
-_spr_common_init_path:
-		.db '/','i','n','i','t',0
-
-_spr_common_init_argv:
-		.dw _spr_common_init_path
-		.dw 0
-
-_spr_common_init_envp:
-		.dw 0
-
 ; Kernel pathname must survive the CODE1 -> CODE3 filesystem call.
 	.globl _spr_tty_path
 _spr_tty_path:
@@ -1993,14 +2109,21 @@ _sprinter_rst38_ret:
 map_savearea:
 	.db 0, 0, 0, 0		; saved mapping
 
+map_savkern:
+	.db 0, 0, 0
+
+spr_idle_irq:
+_spr_idle_irq:
+	.db 0
+
 map_savearea_user:
 	.db 0, 0, 0, 0		; usermem private saved mapping
 
 _int_disabled:
 	.db 1
 
-; 0 at boot so sprinit write returns use stock ei.
-; _doexec sets this on the second+ exec (/bin/sh); unix_pop skips ei.
+; Set at first exec for existing vector/heap bring-up guards. The local
+; lowlevel adapter enables IRQs at the stable syscall and user boundaries.
 _sprinter_bringup_noei:
 	.db 0
 

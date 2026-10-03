@@ -3,16 +3,23 @@
 Port of FUZIX OS to the Sprinter — a Russian ZX Spectrum-compatible home computer
 with a full Z80 CPU upgrade, 4 MB RAM and IDE storage.
 
-**Latest checkpoint (2026-10-02, PROGTOP E000 / WIN3 user stack):**
-User memory ends at `E000`, adding 8 KB above the previous C000 limit;
-the full-size user stack is now in WIN3. IM2 occupies `E000..E100` with
-its jump at `E1E1`; udata/kernel stacks/code remain at `EE00` and above.
-Repeated echo, all 117 entries from `ls /bin`, large exec/fork and a
-one-page small-map fork/wait probe pass. A separate large PID1 `/init`
-also boots to the shell. IM2, DCP and executable code survive unchanged.
-The production tiny `/init`, PID1 argument workarounds, disk-write guards,
-heap-growth guards and disabled normal IRQ handling remain bring-up
-limitations. ISA gateway work is deferred until driver integration.
+**Latest checkpoint (2026-10-03, kernel IRQs / atomic bank transitions):**
+The production image uses stock `/init` and a Sprinter console inittab.
+MAME boots through getty and root login to the V7 shell, prints all 117
+entries from `ls /bin`, and validates init reaping and respawning its
+console child. PID1 now uses real argv/envp, its invocation name and the
+executable header's entry point. PROGTOP remains `E000` with the user
+stack in WIN3; IM2, DCP and immutable executable code pass snapshot checks.
+Frame IRQs now service the timer in syscall code, including temporary
+user and VRAM mappings. Bank/cache/port commits mask IRQs atomically
+and preserve the caller's interrupt state. Keyboard polling stays in
+user mode and bounded idle to avoid reentrant console output. A CPU-only
+fork test still confirms user preemption and SP/IX/IY/alternate-register
+preservation. Four final replays validate 17382 exact IRQ map restores;
+`sleep 2` waits 2.028 seconds in MAME. Reliable PS/2 input, a stable CTC
+clock, writable-root startup and
+removal of guarded heap/diagnostic shortcuts remain bring-up work.
+ISA gateway work is deferred until driver integration.
 See the final update below. Earlier sections are historical.
 
 ## Hardware
@@ -27,7 +34,7 @@ See the final update below. Earlier sections are historical.
 | Keyboard | PS/2 via Z84C15 SIO Channel A (data port #18, control port #19) |
 | Storage | IDE (16-bit ports: read #0050, write #0150) |
 | FDD | WD1793 via MAX7000 (not yet supported) |
-| Timer | CTC channels #10–#13; channel 0 generates 50 Hz system tick |
+| Timer | Frame IRQ (~50 Hz); CTC channels #10–#13 remain reset during bring-up |
 | RTC | CMOS via ports #1C (data read) / #1D (data write) / #1E (address) |
 
 ## Kernel Memory Layout
@@ -11300,3 +11307,523 @@ live WIN3 remains **4B**, not owned page 3F. Kernel page **48**:
 Current symbols: `_pagemap_prepare=775A`, `_spr_prep_old=6A8D`,
 `_switchin=FA93`, `_dofork=FB82`, `mpgsel_cache=FF0D`, `_kernel_pages=FF11`,
 `_spr_doexec_count=FF22`, `_sprinter_dbg=FF25`. Resolve after each rebuild.
+
+### Update: stock init, real PID1 arguments and console respawn (2026-10-02)
+
+**Current milestone:** the production filesystem now installs
+`Applications/util/init` as `/init`, with the platform inittab selecting
+runlevel 3 and `respawn:getty /dev/tty1`. The complete init/getty/login
+chain reaches the verified V7 shell. Init stays PID1, collects an exited
+console child and launches another getty. The tiny `sprinit_raw` is no
+longer the production bootstrap.
+
+Changes:
+
+- The existing guarded `rebuild_init_argv()` now runs in `complete_init`,
+  after the kernel/root mapping is ready. Bootstrap scratch in user WIN0
+  contains `/init`, its argv pointer and the terminating empty environment.
+  The common-memory argument override in `exec_or_die` is removed.
+- Exec reads PID1 arguments/environment through ordinary `rargs` and
+  copies its invocation name through ordinary `ugetp`/`uget`. The synthetic
+  `/bin/sh` argv, empty env, name `init` and forced entry offset 12 are gone.
+  The guarded reset of `u_sysio` after the kernel header read remains.
+- The existing platform relocation helper also applies to the first exec.
+  Stock init has 1940 relocation sites. Exempting it allowed its crt0 to
+  relocate after low-page stubs were installed; the failed replay reached
+  SP=E0F6 / return PC=FFFF and HALT. Relocating before reinstalling stubs,
+  with the existing DE=0 entry convention, boots stock init successfully.
+  Absolute asm probes remain accepted without a relocation stream.
+- `plt_idle` again polls the keyboard. Getty runs as a child, so the old
+  guarded PID1-only sleep polling cannot wake its tty read. With normal
+  IRQ dispatch suppressed, idle polling supplies input to this child.
+  Software timer ticks and the existing IRQ absorber remain unchanged.
+- The Sprinter filesystem overlay supplies a minimal `inittab`; `/etc/rc`
+  is deliberately deferred until writable-root validation. Keep its
+  leading comment: stock init's in-place parser expects spare bytes before
+  its first record, as provided by the generic inittab's comment header.
+  A fixture with a record at byte zero overwrote the record while parsing.
+- Read-only MAME scripts accept `FUZIX_MAME_TRACE_EXEC=1` for first-exec
+  tracing and `FUZIX_MAME_FOLLOW_TIME` for a command after child login.
+  The previous fixed t=18 follow-up arrived before the login shell was
+  ready (about t=24). These scripts do not change RAM or bank mappings.
+
+**Validation:** `make TARGET=sprinter diskimage` completed successfully
+before the final replays and regenerated IMG/CHD. Two independent replays
+of that production CHD run to t=110 with no HALT or invalid-page stop:
+
+1. `pid1-init-production`: root login reaches shell PID2; `ls /bin` runs
+   as PID3, prints all 117 names from the filesystem, exits and is reaped
+   by the shell with `u_error=0`.
+2. `pid1-init-respawn-exec`: root login reaches shell PID2 and `echo alive`
+   runs as PID3. `exec /bin/true` replaces PID2, which exits; init's wait
+   returns PID2 with `u_error=0` at return PC=34D1. Init starts another
+   getty/login, shell PID5 reaches userspace with `LOGNAME=root` and
+   `HOME=/root`, and `echo again` runs as PID6. Init remains waiting in
+   its process-table slot. This test uses `exec /bin/true` because the
+   current V7 interactive shell's `exit` builtin returns to its prompt.
+
+Entry snapshots match init after 1940 relocations, shell after 3201,
+ls after 2418, echo after 243 and true after 63. Final shell code and the
+parent init code also match. Init's FCC crt0 places its writable `environ`
+word at 018F..0190 within text: it legitimately changes from zero to DFF2.
+`check_runtime.py --map` excludes this two-byte symbol from immutable-code
+comparison; the replay validator separately checks that it points at
+the original empty env array. No other parent code bytes differ.
+
+Every saved exec/final image retains top=E000, all 257 E1 table bytes
+at E000..E100 and `C3 76 F1` at E1E1. Physical DCP page 40 is identical
+to its baseline. Parent init survives fork, child exec and tty sleeps.
+Initial argv is `["/init"]` with no env; login shell argv is `["-sh"]`
+with PATH, CTTY, LOGNAME, HOME and SHELL supplied by login.
+
+A separate absolute bootstrap fixture under `pid1-argv-fixtures` uses
+header entry offset 1A and verifies argc/argv before printing `INITARGVOK`.
+Its body matches at entry 011A. It then execs the shell in PID1 with
+argv `["pid1-shell", "-i"]` and env
+`["SPRTEST=PID1_ENV_OK", "PATH=/bin"]`; snapshots and shell `set` output
+confirm both environment values. This fixture uses the earlier kernel
+before idle polling was enabled; the two production replays cover the
+final kernel's real init and login arguments.
+
+All shared-source edits remove or adjust existing
+`CONFIG_SPRINTER_EARLY_TRACE` paths. Final SDCC preprocessing for zxevo
+produces identical token streams before/after for `start.c`, `process.c`
+and `syscall_exec16.c`. No new unguarded core fix was introduced.
+`git diff --check` passes.
+
+Evidence lives under `Images/sprinter/mame_out/runtime-baseline/`:
+`pid1-init-production/` and `pid1-init-respawn-exec/` contain console and
+register logs, per-exec and final user snapshots, physical pages, matching
+kernel/application maps and binaries, inittab and `validation.txt`.
+`pid1-argv-env-set/` retains the custom-entry argv/env replay;
+`pid1-argv-fixtures/` retains its source, separate images, the respawn
+input script and `validate-init.py`. Diagnostic failures preceding these
+runs are not checkpoints. Production listing replay uses `mame_fork.lua`,
+`FUZIX_MAME_TRACE_EXEC=1`, `FUZIX_MAME_COMMAND='root{ENTER}'`,
+`FUZIX_MAME_FOLLOW='ls /bin{ENTER}'`, `FUZIX_MAME_FOLLOW_TIME=32`,
+`FUZIX_MAME_STOP=110` and MAME `-seconds_to_run 115`. Respawn uses the
+retained `respawn.lua`, the same timing and `FUZIX_MAME_FOLLOW='echo alive{ENTER}'`;
+it additionally posts `exec /bin/true`, root and `echo again` at t=48/56/80.
+Final production SHA256:
+
+- IMG: `fc5801d7023f7bb07c90b923d1c683bfc65e63d3ba4389f039c0dc589371093d`
+- CHD: `12a3f1ffe9fd5f7655bea8539d549c259fba99eb5b81abf6a09214a72c2c5458`
+
+**Remaining limitations:** root is still read-only and disk-write guards
+remain enabled. Login prints `unable to change owner of controlling tty`
+but continues. The minimal inittab does not run rc, fsck, date or accounting
+initialization. PS/2 posting duplicates or loses characters: the respawn
+replay includes a leftover `rue` and one failed login before the confirmed
+second root shell. These artifacts have not been hidden or fixed.
+Normal IRQ dispatch/preemption and real timer cadence, positive-sbrk/brk
+caps, swap and a build without early-trace diagnostics remain unvalidated.
+Next work should establish reliable IRQ/keyboard timing, then writable-root
+metadata and full startup, before stripping diagnostics for a release.
+ISA networking still requires the platform gateway described above.
+
+Focused hardware dumps: parent init pages **3C 3D 3E 3F**, first login
+shell **38 39 3A 3B**, and its external child **34 35 36 37**. In each top
+page capture virtual `DF00..DFFF` (user stack), `E000..E100`,
+`E1E1..E1E3`, `EE00..EFFF` and `FF00..FF4C`. PID1 before its first fork
+still uses live WIN3 **4B**. Kernel page **48**: `10A4..1184` (process
+slots), `2164..228F` (inodes), `280F..3236` (buffers). Current symbols:
+`_pagemap_prepare=7743`, `_spr_prep_old=6A76`, `_rebuild_init_argv=C6E4`,
+`_plt_idle=4027`, `_kbd_poll=7446`, `_rargs=6ED4`, `_wargs=6FFE`,
+`__execve=716A`, `_switchin=FA93`, `_dofork=FB82`, `udata=EE00`,
+`mpgsel_cache=FF0D`, `_kernel_pages=FF11`, `_spr_doexec_count=FF22`,
+`_sprinter_dbg=FF25`. Resolve after each rebuild.
+
+### Update: hardware frame IRQ paces idle ticks (2026-10-02)
+
+**Current milestone:** `plt_idle` no longer calls `timer_interrupt` on
+every busy-loop iteration. It polls the child's tty, waits for a hardware
+frame IRQ, then advances the timer once. The production image retains
+stock init/getty/login and its read-only root. User and general kernel
+IRQ dispatch remain suppressed.
+
+Local references: `manual/09_advanced/01_interrupts.md` describes the
+FPGA interrupt latch and acknowledgement; `05_vsync_practice.md` explains
+ALL_MODE bit 3 and the independence of SIO polling from keyboard IRQs.
+BIOS `Shared_Includes/constants/SP2000.inc` describes the 32-cycle
+frame/keyboard pulse and acknowledgement. The local MAME
+`src/mame/sinclair/sprinter.cpp::irq_on/irq_off` and `irqack_cb` confirm
+the emulated pulse and clearing on CPU acknowledgement. Its screen period
+is 896*320/(42 MHz/3) = 20.48 ms in the tested configuration.
+
+Changes are confined to `platform-sprinter/`:
+
+- `_spr_idle_wait` lives in COMMONMEM, uses the existing WIN3 stack and
+  does not change any page register. `DI; EI; HALT; DI; RET` uses EI's
+  interrupt shadow to make HALT safe against an IRQ arriving just before
+  the wait. The existing IM2 absorber acknowledges the interrupt and
+  returns with IFF1 clear; the helper also returns with IRQs disabled.
+- Existing initialization leaves all four CTC channels reset, SIO Rx
+  interrupts disabled and ALL_MODE=03 (keyboard IRQ bit 3 clear). Frame
+  IRQ is the wait source in these replays. Future interrupt-producing
+  devices need source dispatch; treating every IRQ as a frame tick will
+  no longer suffice when they are enabled.
+- Both MAME observers accept HALT only at the linked `spr_idle_halt`
+  instruction or its successor. HALT elsewhere remains a failure. A
+  stalled idle still reaches the time-limit dump with PC/stack/IFF state.
+- `mame_clock.lua` observes the IM2 target and bank-qualified timer entry
+  without reading device ports or changing RAM/mappings. It logs IRQ and
+  timer counts, the global decisecond counter, partial ticks and IFF1.
+
+**Build and validation:** `make TARGET=sprinter diskimage` completed with
+exit 0 before replay and regenerated IMG/CHD. Three production-CHD replays
+pass; no fatal HALT or invalid-page stop occurs:
+
+1. `irq-idle-sleep`: root login reaches shell PID2; stock `sleep 2` runs
+   as PID3. Its pause(20 deciseconds) enters at t=35.389413 and returns
+   at t=37.376998 with `u_error=0` (elapsed **1.987585 s**). The shell
+   reaps PID3 without error and returns to its prompt.
+2. `irq-idle-ls`: `ls /bin` prints all **117** filesystem names and the
+   login shell reaps it normally.
+3. `irq-idle-respawn-retry`: `echo alive`, `exec /bin/true`, init reaping
+   PID2 and respawning getty/login, a second root shell PID5, and
+   `echo again` PID6 all succeed. The input script submits an empty
+   password for the known leftover username `rue` at t=56, then root
+   at t=65 and echo at t=90. This adapts the replay to the existing
+   keyboard artifact; the artifact itself remains unfixed.
+
+In the final 20-second idle interval of each run, timer calls and accepted
+IRQs advance together at exactly **48.828125/s**, matching MAME's 20.48 ms
+frame period. The global decisecond/partial-tick counters account for all
+timer calls. There is no busy-loop tick inflation in these intervals.
+FUZIX still uses nominal TICKSPERSEC=50; frame-based time therefore runs
+about 2.34% slow in this MAME configuration. Hardware video timing and a
+stable CTC-derived system clock still require validation.
+
+Init, shell, sleep, ls, true and both echo entry images match their
+relocated binaries. Final shell code and parent init code match; the
+mutable crt0 environ word is checked separately as in the prior milestone.
+All saved exec/final images retain top=E000, the full E000..E100 table and
+E1E1 jump to F176. DCP page 40 remains identical to the baseline.
+`git diff --check` passes; no core or application source changed this step.
+
+Evidence under `Images/sprinter/mame_out/runtime-baseline/`:
+`irq-idle-sleep/`, `irq-idle-ls/`, `irq-idle-respawn-retry/` retain console,
+register and clock logs, entry/final/physical snapshots, matching maps and
+binaries, observer/input scripts and `validation.txt`.
+`irq-idle-fixtures/validate-idle.py` checks those results.
+The first `irq-idle-respawn/` replay reaps PID2 and starts getty, but its
+fixed t=56 root input lands at the password prompt for `rue`; it is a
+diagnostic input failure, not a validated second-login checkpoint.
+
+Listing replay uses `mame_clock.lua`, `FUZIX_MAME_TRACE_EXEC=1`,
+`FUZIX_MAME_COMMAND='root{ENTER}'`, `FUZIX_MAME_FOLLOW='ls /bin{ENTER}'`,
+`FUZIX_MAME_FOLLOW_TIME=32`, `FUZIX_MAME_STOP=110`, MAME
+`-seconds_to_run 115`. Sleep uses follow `sleep 2{ENTER}` and stop/run
+85/90; respawn uses its retained script, follow `echo alive{ENTER}` and
+stop/run 130/135. Final production SHA256:
+
+- IMG: `f44eb3e22058a68a44342c003e0cf803416be52bc499e6cc5046838fd8e1478c`
+- CHD: `8a3d05950a92e99054a801542be6c8429c1181ecb55346e0b063eebd06f8152d`
+
+**Remaining work:** this only paces the real idle path. Time does not
+advance during uninterrupted user execution or long kernel work: the
+clock trace explicitly shows this during login loading. The guarded PID1
+tty busy-poll shortcut in core can still generate software ticks if taken;
+stock init's wait/getty path does not use it in these tests. Normal IRQ
+dispatch requires an audit of saving/restoring both hardware mappings and
+the banked-call overlay state before enabling kernel IRQs or preemption.
+Software heap/write guards, read-only root, full rc, swap and PS/2 loss /
+duplication remain open. ISA coexistence stays deferred.
+
+Focused next hardware dumps: idle PC/stack/IFF1/IM/I plus `DF00..DFFF`,
+`E000..E100`, `E1E1..E1E3`, `EE00..EFFF`, `FF00..FF51` in the live common
+page. Kernel page **48**: `1092..10A3` (partial/decisecond timer state),
+`10A4..1184` (process slots), `2164..228F` (inodes), `280F..3236` (buffers).
+Current symbols: `_spr_idle_wait=F181`, `spr_idle_halt=F183`,
+`_timer_interrupt=49A2` (CODE2 / pages 4C,4D), `_switchin=FA98`,
+`_dofork=FB87`, `udata=EE00`, `mpgsel_cache=FF12`, `_kernel_pages=FF16`,
+`_spr_doexec_count=FF27`, `_sprinter_dbg=FF2A`. COMMONMEM ends at FF11;
+COMMONDATA occupies FF12..FF51. Resolve after rebuilding.
+
+### Update: real user IRQs and preemption (2026-10-02)
+
+**Current milestone:** frame IRQs run the banked Z80 interrupt handler,
+`timer_interrupt` and keyboard polling while user code runs, and during
+the bounded `plt_idle` wait. User processes can now be preempted without
+making a syscall. Kernel execution outside that wait remains masked or
+uses the absorber; enabling arbitrary kernel IRQs is still an open task.
+The production filesystem continues to use stock init/getty/login and
+the V7 shell, with PROGTOP=E000 and a read-only root.
+
+Three constraints were exposed by the IRQ probes:
+
+- `map_save_kernel` and `map_restore` were linked into WIN0 `_CODE`.
+  An IRQ from user mode therefore called application bytes instead of
+  those routines. The first probe ran stock init recursively on an IRQ
+  stack and never reached a valid shell. Both mapping routines now live
+  in COMMONMEM and leave WIN3 unchanged.
+- An IRQ callback uses the banked-call overlays and changes
+  `_kernel_pages`. Saving only `mpgsel_cache` loses that logical state.
+  The IRQ mapper now saves/restores both maps, and restores WIN0..2
+  directly without the user-page clamp. Temporary VRAM mappings must
+  also survive when kernel IRQ support is eventually enabled.
+- A later probe caught an IRQ in a kernel overlay transition at
+  t=33.280490: hardware WIN0..2 were `48 49 4A`, logical pages were
+  already `48 4C 4D`, and restore installed `48 4C 4D`. The cache and
+  OUT sequence is not atomic. `_spr_irq_gate` therefore dispatches only
+  when `u_insys==0` or the bounded idle wait is explicitly armed. Other
+  kernel IRQs go to the existing absorber, which returns without EI.
+  This bounds the supported IRQ contexts; it does not fix the transition.
+
+All changes in this iteration are in `platform-sprinter/`:
+
+- `build_lowlevel.py` generates a local `lowlevel.s` from the shared
+  banked Z80 source. It redirects syscall return to `_spr_user_ret` and
+  removes the replaced exec body, without editing the shared file. Each
+  source boundary must match exactly once or generation fails. The
+  platform link file selects this object; other targets retain theirs.
+- `_spr_user_ret` preserves syscall carry and enables IRQs only after
+  restoring the user's registers, stack and mapping. Kernel syscall
+  work keeps the existing noei gate set from the first exec.
+- `_spr_doexec` supplies the SDCC exec-entry ABI locally, installs the
+  user mapping/stack and points the E1E1 IM2 jump at `_spr_irq_gate`
+  before enabling IRQs. Boot still uses the absorber until first exec.
+  The `_doexec` alias also satisfies existing platform assembly users.
+- `_spr_idle_wait` arms an idle-only IRQ flag around `EI; HALT; DI`,
+  then clears it and returns disabled. `plt_idle` no longer polls the
+  keyboard or adds software timer ticks. Both actions happen once in
+  `plt_interrupt`, avoiding double counting and polling reentrancy.
+- Unused common-memory bootstrap pathname/argv/env arrays and the old
+  exec body were removed to make room. COMMONMEM ends at FF6B;
+  COMMONDATA is FF6C..FFAF, leaving 80 bytes before the address-space end.
+
+**Build and validation:** `make TARGET=sprinter diskimage` completed
+with exit 0 before the final replays and regenerated IMG/CHD. Four final
+MAME replays pass, with no fatal HALT or invalid-page stop:
+
+1. `irq-gated-spin`: a separate assembly fixture forks a CPU-only child.
+   Its loop has no syscalls and no EI/DI. Child start output occurs at
+   t=33.535622; the parent prints during the loop at t=34.182468. The
+   child confirms SP, IX=1357, IY=2468 and alternate BC/DE/HL sentinels
+   at t=42.965756; the parent reaps it with status zero at t=43.050769.
+   The timer advances at frame cadence during the loop. This run records
+   465 user IRQs, one preemption and 3569 exact map restores. The fixture
+   is only in a separate test CHD, never in the production filesystem.
+2. `irq-gated-sleep`: stock `sleep 2` runs as PID4 after a known stray
+   input command. Pause(20 deciseconds) lasts **2.014808 s** and returns
+   without error; the shell reaps PID4. There are 3030 exact restores.
+3. `irq-gated-ls`: stock `ls /bin` prints all **117** names, matching
+   filesystem directory entries, and exits/reaps normally. There are
+   3538 exact restores and one user preemption.
+4. `irq-gated-respawn-retry`: echo alive, exec true in shell PID2,
+   init reaping PID2, getty/root login in PID6, and echo again in PID8
+   succeed. Init and the new shell both end sleeping. There are 4531
+   exact restores. The script sends an empty password at t=56 for the
+   leftover `rue`, root at t=65, Enter at t=80 to consume leftover `ro`,
+   and echo again at t=90. Input duplication remains visible in the log.
+
+Across these four runs **14668** dispatched IRQs restore both hardware
+and logical maps exactly, with zero mismatches. Their final idle periods
+have one timer call per IRQ at **48.828125/s**. Counter totals match
+`ticks*5 + partial_ticks`; there is no idle software-tick inflation.
+Additional kernel IRQs counted at the gate are absorbed without ticking.
+Long kernel work consequently still loses elapsed time. The nominal
+50 Hz FUZIX clock also runs about 2.34% slow at MAME's 20.48 ms frame
+period; hardware cadence and a CTC clock remain to be established.
+
+Entry snapshots match relocated init, shell, sleep, ls, true and echo.
+The absolute probe body matches its fixture binary. Final shell code and
+parent init code remain intact; init's mutable environ pointer still
+addresses its original empty env. Each exec/final snapshot retains
+top=E000, all 257 E1 bytes and `C3 8F F1` at E1E1. DCP page 40 is
+unchanged. No shared kernel or application source changed in this step;
+`git diff --check` passes.
+
+Evidence under `Images/sprinter/mame_out/runtime-baseline/`:
+`irq-gated-spin/`, `irq-gated-sleep/`, `irq-gated-ls/` and
+`irq-gated-respawn-retry/` retain console/register/clock logs,
+exec/final/physical snapshots, matching maps/binaries and validation.
+`irq-user-fixtures/` retains the CPU probe, its separate images and
+`validate-user-irq.py`. Replays use `mame_clock.lua`, trace-exec=1,
+root at the normal login input and follow commands at t=32. Stop/run
+times are 95/100 for spin, 85/90 for sleep, 110/115 for ls and 130/135
+for respawn (its retained input script adds the commands above).
+`irq-user-sleep/` is the WIN0 mapper failure;
+`irq-user-mapdiag/` records the kernel transition failure;
+`irq-user-spin/` precedes the gate and includes one map mismatch.
+The first `irq-gated-respawn/` reaches the second shell but its last
+command is corrupted by input leftovers. These are diagnostic runs,
+not final checkpoints. The runtime u_insys observer can label preemption
+as a repeated last syscall/write; the CPU probe's screen output and
+separate preemption/map taps are used to disambiguate it.
+
+Final production SHA256:
+
+- IMG: `f2b726515ff78f36d6b3a9b1c3041682952f6d5ff407e8f32c5c4968ba865420`
+- CHD: `b1c449b61d21b2d58a8fd5d68dcb324a6e0f196ed5b81846547d07b55ae3d700`
+
+**Next work:** audit atomicity of cache/logical-map/OUT updates, banked
+call entry/return and video mapping while preserving caller IRQ state.
+Only then permit timer/device servicing in arbitrary kernel contexts.
+PS/2 loss/duplication, positive-sbrk/brk guards, signal delivery shortcuts,
+swap, writable-root startup/full rc and removal of early-trace diagnostics
+remain open. Additional IRQ sources require proper dispatch before they
+are enabled; the current timer assumes only frame IRQs. ISA gateway work
+remains deferred until driver integration.
+
+Focused hardware dumps: record PC/SP/IFF1/IM/I and MPGSEL_0..3; user
+stack `DF00..DFFF`, IM2 `E000..E100` / `E1E1..E1E3`, udata and stacks
+`EE00..F0FF`, common map state `FF6C..FFAF` in the active top page.
+Parent init owns pages **3C 3D 3E 3F**; shell owns **38 39 3A 3B**.
+Kernel page **48**: `1078..1089` for timer counters and `108A..111F`
+for the first two process slots (all slots: `108A..1539`). Current
+symbols: `_spr_idle_wait=F181`, `spr_idle_halt=F188`,
+`_spr_irq_gate=F18F`, `_spr_user_ret=F1A4`, `_spr_doexec=F1AC`,
+`interrupt_handler=F84F`, `map_restore=F4D0`, `map_save_kernel=F4FC`,
+`_timer_interrupt=49A2` (CODE2 / pages 4C,4D), `_switchin=FAF2`,
+`_dofork=FBE1`, `mpgsel_cache=FF6C`, `_kernel_pages=FF70`,
+`_int_disabled=FF83`, `_spr_doexec_count=FF85`, `_sprinter_dbg=FF88`.
+Resolve addresses again after rebuilding.
+
+### Update: kernel IRQs and atomic bank commits (2026-10-03)
+
+**Current milestone:** frame IRQs now service the real timer during
+syscall C execution as well as user execution and idle. The platform
+lowlevel adapter enables IRQs only after syscall arguments, kernel stack
+and kernel mapping are installed, and sets `_int_disabled=0` at that
+boundary. The old noei byte remains set for existing vector/heap guards;
+it no longer suppresses syscall-entry EI in the generated Sprinter object.
+No shared CPU, core kernel or application source changed this iteration.
+
+Mapping and transfer changes are confined to `platform-sprinter/`:
+
+- `banksetbc` commits logical pages, cache and WIN1/2 under DI, then
+  restores the caller's IFF2. Bank0 calls, indirect stubs, return stubs,
+  force-bank1 and the ioctl common-word workaround all use this same
+  commit. Caller-bank classification is saved before calling it, rather
+  than sharing B with the destination map. These stubs live in WIN0
+  kernel code; they do not change WIN0 and use the live WIN3 stack.
+- `map_kernel` and the WIN0-only kernel mapper mask their cache/OUT
+  updates and preserve both AF and the caller's IFF2. `map_for_swap`
+  similarly commits WIN1 while preserving BC, IFF2 and its normalized
+  page result in A. The latter result is required by `_spr_seed_top`.
+- `usermem.s` masks only the user-window and restore commits. It no
+  longer leaves IRQs disabled after scalar or bulk copies. Between
+  commits the temporary mapping is complete, so IRQ save/restore can
+  preserve it while servicing the timer. An already locked caller stays
+  locked. No syscall ABI or argument offsets change in these copiers.
+- VRAM map/unmap masks the cache, MPGSEL_2 and nesting-depth updates.
+  A timer IRQ may then interrupt actual drawing and restore VRAM page
+  50 exactly, rather than clamping it to a code page.
+- IDE data transfer saves IFF2 before DI and restores it after the whole
+  transfer and kernel remap. It no longer unconditionally enables IRQs
+  in an IRQ-locked caller. Its additional saved word changes the local
+  argument lookup from SP+4 to SP+6; the external SDCC ABI is unchanged.
+- `_spr_irq_gate` now jumps to the full handler for accepted frame IRQs.
+  `plt_interrupt` services the timer in all these contexts, but polls
+  the keyboard only when `u_insys==0` or the idle wait is armed. Keyboard
+  echo must not reenter an interrupted kernel console/scroll operation.
+
+The small common return helpers use `LD A,I` parity to save IFF2 before
+DI, and return through EI's shadow only when the caller had IRQs enabled.
+They do not modify the software interrupt flag during the short assembly
+commit. C critical sections still use the stock `di/irqrestore` flag.
+The first exec and syscall return retain their existing user boundaries.
+Boot still uses the absorber before first exec; fork, seed-top and task
+switching still require disabled IRQs. The legacy cache-fill/apply path
+used by exec/IDE/syscall return also requires a disabled caller. Swap and
+unused legacy map helpers have not been certified for arbitrary IRQ use.
+
+**Build and validation:** the final `make TARGET=sprinter diskimage`
+completed with exit 0 before replay, regenerating production IMG/CHD.
+Four final MAME replays pass, with no fatal HALT or invalid-page stop:
+
+1. `irq-kernel-ls-fix`: stock init/getty/root login reaches shell PID2.
+   `ls /bin` runs as PID3, prints exactly the **117** filesystem names
+   and is reaped normally. There are **1136** IRQs in active kernel code,
+   including 464 with temporary maps (396 while WIN2 holds VRAM).
+2. `irq-kernel-spin`: the isolated CPU-only fork fixture still passes.
+   Child start output is at t=33.549764; the parent runs during its loop
+   at t=34.121056. Child SP, IX/IY and alternate BC/DE/HL checks pass at
+   t=42.941872; the parent reaps it with zero status at t=43.029856.
+   One user preemption occurs. There are 454 active-kernel IRQs and
+   **68204** helper-return IFF checks with no mismatch.
+3. `irq-kernel-sleep`: stock sleep PID3 pauses for 20 deciseconds for
+   **2.027998 s**, returns without error and is reaped by shell PID2.
+   There are 512 active-kernel IRQs and **68124** successful IFF checks.
+4. `irq-kernel-respawn`: echo alive PID3, exec true in PID2, init reaping
+   PID2, getty/root login in PID4 and echo again PID5 all succeed.
+   Init and shell both finish sleeping. There are 1032 active-kernel
+   IRQs and **119733** successful IFF checks. The existing input script
+   sends Enter at t=56, root at t=65, Enter at t=80 and echo at t=90.
+   Leftover username `bue`, one failed login and a trailing stray `e`
+   remain visible; PS/2 duplication has not been fixed.
+
+The four runs total **17382** exact IRQ hardware/logical map restores,
+including **3134** active-kernel IRQs, **784** temporary-map IRQs and
+**493** VRAM IRQs. No cache/hardware mismatch exists at any sampled IRQ
+entry. The final three replays additionally check **256061** helper
+returns with no IFF mismatch and no unmatched entry at the final sample.
+The listing replay predates the IFF taps; it covers the same final kernel
+and the cache/map/context checks. The readonly observer qualifies WIN0
+code fetches by physical page 48 and accounts for the destination bank
+when a bank commit returns to a remapped caller.
+
+Each final idle interval has one timer call per IRQ at **48.828125/s**;
+all timer totals equal `ticks*5 + partial_ticks`. The CPU-only loop also
+advances at frame cadence. The extra accepted IRQ in the final clock
+sample is still in the handler prologue and has not called the timer yet.
+Long explicitly disabled sections can still lose frame time; nominal
+TICKSPERSEC=50 versus MAME's 20.48 ms frame remains about 2.34% slow.
+A stable CTC clock and hardware validation remain required.
+
+Exec snapshots match relocated stock init, shell, sleep, ls, true and
+echo; the absolute probe body matches its binary. Final shell and parent
+init code remain intact, including a separately validated mutable init
+environ pointer. All exec/final snapshots retain PROGTOP=E000, the 257
+E1 table bytes and `C3 8F F1` at E1E1. DCP page 40 remains identical.
+COMMONMEM ends at FF6D and COMMONDATA occupies FF6E..FFB1, leaving 78
+bytes before 10000. `git diff --check` passes.
+
+The first `irq-kernel-ls/` replay is a diagnostic failure: the initial
+IFF wrapper changed map_for_swap's returned A from target page 3F to
+I=E0. Seed-top then selected uninitialized common page E0 during first
+fork. This was an ABI error before IRQ dispatch, not evidence against
+the atomic commit. Preserving the normalized result in A fixes it;
+`irq-kernel-ls-fix/` and the other three final replays use that fix.
+
+Evidence under `Images/sprinter/mame_out/runtime-baseline/`:
+`irq-kernel-ls-fix/`, `irq-kernel-spin/`, `irq-kernel-sleep/` and
+`irq-kernel-respawn/` retain console/register/clock logs, snapshots,
+matching kernel/application maps and binaries, platform source,
+observers/input script, build log and `validation.txt`.
+`irq-kernel-fixtures/` retains the probe source/binary/map, separate
+test IMG/CHD/filesystem and `validate-kernel-irq.py`. The production
+filesystem does not contain the probe. Replays use `mame_clock.lua`,
+trace-exec=1, root login and a follow command at t=32. Stop/run times
+are 110/115 for ls, 95/100 for spin, 85/90 for sleep and 130/135 for
+respawn; respawn adds its retained input sequence.
+
+Final production SHA256:
+
+- IMG: `2beeb367b758918fde2518feb9a4dcbbfb5cc3c0ed6ccd3d88b3261f37c97fff`
+- CHD: `dc2bfbbea09c7ddbc58233fbfb9c4c43ca85fdf1ba51f145d2f2fe945a3cdc48`
+
+**Next work:** reliable PS/2 input and a stable timer source, then
+writable-root metadata/full startup. Signals, swap, positive-sbrk/brk
+guards, PID1 sleep/pause shortcuts and a build without early tracing
+remain open. Additional interrupt sources need real source dispatch;
+the current timer assumes frame IRQs only. Audit callers of the legacy
+DI-only map helpers before extending their use. ISA gateway work stays
+deferred until driver integration. These are emulator checkpoints;
+the new interrupt paths still need a real Sprinter replay.
+
+Focused hardware dumps: PC/SP/IFF1/IFF2/IM/I plus MPGSEL_0..3, user
+stack `DF00..DFFF`, IM2 `E000..E100` / `E1E1..E1E3`, udata and stacks
+`EE00..F0FF`, and map/trace state `FF6E..FFB1` in the active top page.
+Parent init uses **3C 3D 3E 3F**, shell **38 39 3A 3B**. Kernel page
+**48**: timer counters `1062..1073`, first two process slots
+`1074..1109` (all slots `1074..1523`). Current symbols:
+`banksetbc=0466`, `map_for_swap=03A3` (both kernel WIN0),
+`_spr_idle_wait=F181`, `spr_idle_halt=F188`, `_spr_irq_gate=F18F`,
+`spr_irq_ret=F192`, `_spr_user_ret=F19F`, `_spr_doexec=F1A7`,
+`map_kernel=F41A`, `map_restore=F4DD`, `map_save_kernel=F509`,
+`interrupt_handler=F85A`, `_timer_interrupt=49A2` (CODE2 / 4C,4D),
+`_switchin=FAFD`, `_dofork=FBEC`, `mpgsel_cache=FF6E`,
+`_kernel_pages=FF72`, `_spr_idle_irq=FF80`, `_int_disabled=FF85`,
+`_spr_doexec_count=FF87`, `_sprinter_dbg=FF8A`. Resolve after rebuilding.

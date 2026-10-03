@@ -15,7 +15,7 @@ platform/platform-sprinter/sprinter.rel
 platform/platform-sprinter/sprvideo.rel
 start.rel
 version.rel
-cpu-z80/lowlevel-z80-banked.rel
+platform/platform-sprinter/lowlevel.rel
 platform/platform-sprinter/tricks.rel
 platform/platform-sprinter/main.rel
 timer.rel

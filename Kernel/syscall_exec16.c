@@ -336,9 +336,6 @@ arg_t _execve(void)
 		spr_map_win0_k();
 	}
 	entry_off = hdr.a_entry;
-	/* Bring-up: sprinit_raw always enters at PROGLOAD+0x12. */
-	if (udata.u_ptab->p_pid == 1)
-		entry_off = 0x12;
 #endif
 	EX_SDBG(0xE2,
 		hdr.a_base, hdr.a_size,
@@ -420,29 +417,8 @@ arg_t _execve(void)
 
 	/* Read args and environment from process memory */
 #ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/*
-	 * Header readi() leaves u_sysio sticky.  On Sprinter BANK16,
-	 * spr_map_win0_k() already put kernel page 0 in WIN0, so
-	 * rargs() via kernel deref of user argv walks CODE into E2BIG
-	 * (stage 8).  sprinit_raw always passes argv={"/bin/sh",0} and
-	 * empty env — synthesize both.
-	 */
+	/* Header readi() used kernel I/O; arguments are in process memory. */
 	udata.u_sysio = false;
-	if (udata.u_ptab->p_pid == 1) {
-		abuf->a_buf[0] = '/';
-		abuf->a_buf[1] = 'b';
-		abuf->a_buf[2] = 'i';
-		abuf->a_buf[3] = 'n';
-		abuf->a_buf[4] = '/';
-		abuf->a_buf[5] = 's';
-		abuf->a_buf[6] = 'h';
-		abuf->a_buf[7] = 0;
-		abuf->a_argc = 1;
-		abuf->a_arglen = 8;
-		ebuf->a_argc = 0;
-		ebuf->a_arglen = 0;
-		udata.u_error = 0;
-	} else {
 #endif
 	if (rargs(argv, abuf))
 	{
@@ -458,9 +434,6 @@ arg_t _execve(void)
 		sprinter_exec_fail_err = udata.u_error;
 		goto nogood3;	/* SN */
 	}
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	}
-#endif
 	EX_TRACE(0xF8);
 
 	/* This must be the last test as it makes changes if it works */
@@ -666,24 +639,8 @@ arg_t _execve(void)
 #endif
 
 	// Fill in udata.u_name with program invocation name
-#ifdef CONFIG_SPRINTER_EARLY_TRACE
-	/* PID1 bring-up: ugetp/uget here has been crashing after wargs
-	 * (E8 reached, A3 not).  Skip name copy for init; keep path alive. */
-	if (udata.u_ptab->p_pid != 1) {
-		uget((void *) ugetp(nargv), udata.u_name, 8);
-		memcpy(udata.u_ptab->p_name, udata.u_name, 8);
-	} else {
-		udata.u_name[0] = 'i';
-		udata.u_name[1] = 'n';
-		udata.u_name[2] = 'i';
-		udata.u_name[3] = 't';
-		udata.u_name[4] = 0;
-		memcpy(udata.u_ptab->p_name, udata.u_name, 8);
-	}
-#else
 	uget((void *) ugetp(nargv), udata.u_name, 8);
 	memcpy(udata.u_ptab->p_name, udata.u_name, 8);
-#endif
 
 	tmpfree(abuf);
 	tmpfree(ebuf);
@@ -808,16 +765,8 @@ arg_t _execve(void)
 				((uint16_t)((uint8_t *)&udata.u_page)[1] << 8);
 			goto nogood4;
 		}
-		/*
-		 * Kernel-side reloc for /bin/sh only (2nd+ doexec), then
-		 * reinstall stubs.  User crt0 reloc after stubs has been
-		 * followed by a post-sbrk user wipe of page0; applying
-		 * reloc in-kernel and passing DE=0 avoids that path.
-		 * Do not run on /init — an earlier attempt broke synth
-		 * open of /bin/sh (execve returned to sprinit hang).
-		 */
+		/* Relocate before reinstalling stubs, including the first /init. */
 		{
-			extern uint8_t spr_doexec_count;
 			extern int sprinter_apply_user_reloc(uaddr_t progload,
 							    uaddr_t entry);
 			extern void map_kernel(void);
@@ -826,19 +775,15 @@ arg_t _execve(void)
 			kernel_pages[1] = 0x4E;
 			kernel_pages[2] = 0x4F;
 			map_kernel();
-			if (spr_doexec_count >= 1) {
-				(void)sprinter_apply_user_reloc(progload,
-								entry_abs);
-				for (si = 0; si < sizeof(struct exec); si++) {
-					if (uputc(sys_stubs[si],
-						  (uint8_t *)(progload + si))) {
-						sprinter_exec_fail_stage = 0xF2;
-						sprinter_exec_fail_err =
-							udata.u_error;
-						sprinter_exec_fail_done =
-							(uint16_t)(progload + si);
-						goto nogood4;
-					}
+			(void)sprinter_apply_user_reloc(progload, entry_abs);
+			for (si = 0; si < sizeof(struct exec); si++) {
+				if (uputc(sys_stubs[si],
+					  (uint8_t *)(progload + si))) {
+					sprinter_exec_fail_stage = 0xF2;
+					sprinter_exec_fail_err = udata.u_error;
+					sprinter_exec_fail_done =
+						(uint16_t)(progload + si);
+					goto nogood4;
 				}
 			}
 			/*

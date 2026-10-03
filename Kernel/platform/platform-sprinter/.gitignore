@@ -2,3 +2,4 @@
 *.bin
 fuzix.sprinter
 !fuzix.lnk
+lowlevel.s

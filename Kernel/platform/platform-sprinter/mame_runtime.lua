@@ -2,6 +2,7 @@
 local root = os.getenv("FUZIX_ROOT") or "."
 local out = os.getenv("FUZIX_MAME_OUT") or root .. "/Images/sprinter/mame_out"
 local stop_time = tonumber(os.getenv("FUZIX_MAME_STOP")) or 25
+local trace_exec = tonumber(os.getenv("FUZIX_MAME_TRACE_EXEC")) or 2
 local symbols = {}
 for line in io.lines(root .. "/Kernel/fuzix.map") do
     local addr, name = line:match("^%s+([%x]+)%s+([_%w]+)%s+")
@@ -15,6 +16,7 @@ local dex = assert(symbols._spr_doexec_count)
 local trace_alias = assert(symbols._sprinter_last_panic_ptr)
 local mp = assert(symbols.mpgsel_cache)
 local kp = assert(symbols._kernel_pages)
+local idle_halt = symbols.spr_idle_halt
 local f = assert(io.open(out .. "/runtime.txt", "w"))
 -- A failed /init run must not leave a snapshot from an older successful exec.
 assert(io.open(out .. "/runtime-memory.bin", "wb")):close()
@@ -54,7 +56,7 @@ local function save_user(path, map)
     snapshot:close()
 end
 local function trace_write(addr, data)
-    if rb(dex) < 2 then return end
+    if rb(dex) < trace_exec then return end
     f:write(string.format("write t=%.6f PC=%04X SP=%04X addr=%04X data=%02X up=%s mp=%s call=%02X\n",
         manager.machine.time:as_double(), cpu.state.PC.value, cpu.state.SP.value,
         addr, data, bytes(ud + 2, 4), bytes(mp, 4), rb(ud + 7)))
@@ -119,6 +121,7 @@ emu.register_frame(function()
         rb(ud + 6) == 1 and proc >= assert(symbols._ptab) and proc < 0x4000 and
         (state == 7 or (state == 1 and rb(ud + 7) == 0))
     local corrupt = rb(dex) >= 2 and not valid and not released
+    local idle = idle_halt and (st.PC.value == idle_halt or st.PC.value == idle_halt + 1)
     local key = bytes(ud + 6, 2) .. bytes(trace_alias, 2) .. tostring(st.HALT.value)
     if key ~= last or t >= stop_time then
         last = key
@@ -128,10 +131,10 @@ emu.register_frame(function()
             bytes(ud + 2, 4), bytes(mp, 4), bytes(kp, 3), rw(trace_alias)))
         f:flush()
     end
-    if st.HALT.value ~= 0 or corrupt or t >= stop_time then
+    if (st.HALT.value ~= 0 and not idle) or corrupt or t >= stop_time then
         if tap then tap:remove() end
         if exec_tap then exec_tap:remove() end
-        f:write("stop=" .. (corrupt and "invalid user pages" or st.HALT.value ~= 0 and "HALT" or "time limit") .. "\n")
+        f:write("stop=" .. (corrupt and "invalid user pages" or (st.HALT.value ~= 0 and not idle) and "HALT" or "time limit") .. "\n")
         f:write("dbg=" .. bytes(assert(symbols._sprinter_dbg), 16) .. "\n")
         f:write("stack=" .. bytes(st.SP.value, 64) .. "\n")
         f:write(string.format("hardware pages=%02X %02X %02X %02X\n", page(0), page(1), page(2), page(3)))
